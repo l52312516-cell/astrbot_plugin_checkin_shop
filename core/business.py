@@ -10,9 +10,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 try:  # 作为包被导入（测试 / AstrBot 包加载）
+    from . import emailer
     from .store import Store
     from .timeutil import logical_date_str, normalize_reset_hour, previous_day
 except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 core/
+    import emailer  # type: ignore[no-redef]
     from store import Store  # type: ignore[no-redef]
     from timeutil import (  # type: ignore[no-redef]
         logical_date_str,
@@ -22,6 +24,8 @@ except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 co
 
 REWARD_MODES = ("fixed", "random", "custom")
 REDEMPTION_STATUSES = ("待发放", "已发放", "已取消")
+# 「绑定邮箱」里表示解绑的关键词
+UNBIND_KEYWORDS = {"清除", "解绑", "取消绑定", "删除", "无", "none", "clear", "-"}
 
 # 不可兑换的原因
 REASON_DISABLED = "已下架"
@@ -55,6 +59,18 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+@dataclass
+class HelpView:
+    """商店帮助卡片的内容。"""
+
+    title: str
+    subtitle: str
+    commands: list[tuple[str, str]] = field(default_factory=list)
+    rules: list[str] = field(default_factory=list)
+    steps: list[str] = field(default_factory=list)
+    footer: str = ""
 
 
 @dataclass
@@ -285,6 +301,88 @@ def build_shop_view(
         subtitle=str(settings.get("shop_subtitle") or ""),
         items=items,
     )
+
+
+def reward_rule_text(rewards: dict[str, Any]) -> str:
+    """把打卡积分规则描述成一句人话（帮助卡片用）。"""
+    mode = str(rewards.get("mode") or "fixed")
+    if mode == "random":
+        low = max(0, _as_int(rewards.get("random_min"), 5))
+        high = max(0, _as_int(rewards.get("random_max"), low))
+        low, high = min(low, high), max(low, high)
+        return f"每次随机 {low} ~ {high} 积分"
+    if mode == "custom":
+        values = [max(0, _as_int(item)) for item in rewards.get("custom_list") or []]
+        if values:
+            return "每次随机获得：" + " / ".join(str(item) for item in values) + " 积分"
+        return f"每次固定 {max(0, _as_int(rewards.get('fixed'), 0))} 积分"
+    return f"每次固定 {max(0, _as_int(rewards.get('fixed'), 0))} 积分"
+
+
+def build_help_view(data: dict[str, Any]) -> HelpView:
+    """构造 ``/商店帮助`` 卡片内容。
+
+    规则文字直接取自当前生效的运行数据，因此改了后台配置后帮助图会跟着变。
+
+    Args:
+        data: 数据字典。
+
+    Returns:
+        帮助视图。
+    """
+    settings = data.get("settings") or {}
+    rewards = data.get("rewards") or {}
+    title = str(settings.get("shop_title") or "积分商店")
+    timeout = max(10, _as_int(settings.get("confirm_timeout_seconds"), 60))
+    reset_hour = normalize_reset_hour(settings.get("reset_hour"), 0)
+
+    rules = [f"打卡积分：{reward_rule_text(rewards)}"]
+    if rewards.get("streak_bonus_enabled"):
+        every = max(0, _as_int(rewards.get("streak_bonus_every"), 0))
+        points = max(0, _as_int(rewards.get("streak_bonus_points"), 0))
+        if every > 0 and points > 0:
+            rules.append(f"连签奖励：连续签到每满 {every} 天额外 +{points} 积分")
+    else:
+        rules.append("连签奖励：未开启")
+    rules.append(
+        "统计口径：每天 0 点算新的一天"
+        if reset_hour == 0
+        else f"统计口径：每天 {reset_hour} 点之后算新的一天"
+    )
+    rules.append(f"兑换确认：{timeout} 秒内引用确认消息回复 是 / 否")
+    rules.append("发放通知：兑换记录被标记「已发放」后，机器人会私聊通知你（开启邮件通知时同时发邮件）")
+
+    return HelpView(
+        title=f"{title} · 帮助",
+        subtitle="打卡赚积分，积分可以兑换商品。以下指令需要先唤醒机器人（/ 前缀、@ 机器人或引用机器人消息）。",
+        commands=[
+            ("/打卡", "每天一次，按后台配置发放积分（别名 /签到）"),
+            ("/商店", "查看自己能兑换和暂时换不了的商品"),
+            ("/我的积分", "查看积分、连签天数与最近记录（别名 /积分）"),
+            ("/积分榜", "查看本平台积分排行（别名 /排行榜）"),
+            ("/兑换商品 名称", "发起兑换，机器人会问你是否确认（别名 /兑换）"),
+            ("/绑定邮箱 邮箱", "绑定收件邮箱（发放邮件用）；不带参数查看，填「解绑」清除"),
+            ("/商店帮助", "就是这张图（别名 /打卡帮助）"),
+        ],
+        rules=rules,
+        steps=[
+            "发送 /兑换商品 可乐（名称可以是商品的一部分）",
+            "机器人回复确认提示后，引用那条消息回复 是",
+            "积分与库存当场扣除，管理员在后台标记发放状态",
+            "需要取消时引用确认消息回复 否",
+        ],
+        footer="商品由管理员在 AstrBot 后台的插件页里配置。",
+    )
+
+
+def help_text(view: HelpView) -> str:
+    """帮助卡片的文本化（渲染失败时降级用）。"""
+    lines = [view.title, ""]
+    for name, desc in view.commands:
+        lines.append(f"{name} — {desc}")
+    lines.append("")
+    lines.extend(view.rules)
+    return "\n".join(lines)
 
 
 def find_products(data: dict[str, Any], name: str) -> tuple[list[Product], str]:
@@ -678,6 +776,8 @@ def perform_redemption(
             "product_name": product.name,
             "cost": product.cost,
             "status": "待发放",
+            # 记下发起兑换的会话，发放时才能主动通知本人
+            "session": pending.session_key,
             "created_at": now,
             "updated_at": now,
             "note": "",
@@ -900,6 +1000,58 @@ def adjust_user_points(
     return True, f"积分已从 {before} 调整为 {target}", target
 
 
+def bind_user_email(
+    data: dict[str, Any],
+    user_key: str,
+    value: str,
+    now: float,
+) -> tuple[bool, str, str]:
+    """绑定 / 查看 / 解绑用户的收件邮箱。
+
+    Args:
+        data: 数据快照。
+        user_key: 用户主键。
+        value: 空字符串表示查看；``清除`` / ``解绑`` / ``-`` 等表示解绑；否则是邮箱。
+        now: 当前时间戳。
+
+    Returns:
+        ``(是否成功, 提示文案, 当前邮箱)``。
+    """
+    user = _ensure_user(data, user_key)
+    current = str(user.get("email") or "").strip()
+    text = (value or "").strip()
+    if not text:
+        if current:
+            return True, f"你当前绑定的收件邮箱是：{current}", current
+        return True, "你还没有绑定收件邮箱。发送「绑定邮箱 你的邮箱」即可绑定，例如：绑定邮箱 123@qq.com", ""
+    if text in UNBIND_KEYWORDS:
+        if not current:
+            return True, "你还没有绑定收件邮箱，无需解绑", ""
+        user["email"] = ""
+        user["updated_at"] = now
+        return True, f"已解绑收件邮箱 {current}", ""
+    if not emailer.is_email(text):
+        return False, f"邮箱格式看起来不对：{text}（示例：123@qq.com）", current
+    user["email"] = text
+    user["updated_at"] = now
+    if current and current != text:
+        return True, f"收件邮箱已从 {current} 改为 {text}", text
+    return True, f"已绑定收件邮箱 {text}", text
+
+
+def redemption_notice(record: dict[str, Any]) -> str:
+    """发放成功后发给用户的提示文案。"""
+    name = str(record.get("product_name") or "商品")
+    cost = _as_int(record.get("cost"))
+    nickname = str(record.get("nickname") or record.get("user_id") or "").strip()
+    greeting = f"{nickname}，" if nickname else ""
+    return (
+        f"{greeting}你兑换的「{name}」已发放完成 ✅\n"
+        f"本次消耗 {cost} 积分。\n"
+        "如果还没收到实物/权益，请联系管理员。"
+    )
+
+
 def transition_redemption(
     data: dict[str, Any],
     record_id: str,
@@ -907,16 +1059,21 @@ def transition_redemption(
     note: str,
     restore: bool,
     now: float,
-) -> tuple[bool, str]:
-    """更新兑换记录状态，取消时可选返还积分与回补库存。"""
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """更新兑换记录状态，取消时可选返还积分与回补库存。
+
+    Returns:
+        ``(是否成功, 提示文案, 需要通知用户的记录)``。第三项仅在"首次转为已发放"
+        时非空，调用方据此给用户发提醒。
+    """
     if status not in REDEMPTION_STATUSES:
-        return False, "状态必须是 待发放 / 已发放 / 已取消"
+        return False, "状态必须是 待发放 / 已发放 / 已取消", None
     record = next(
         (item for item in data.get("redemptions", []) if item.get("id") == record_id),
         None,
     )
     if record is None:
-        return False, "兑换记录不存在"
+        return False, "兑换记录不存在", None
     previous = str(record.get("status") or "")
     record["status"] = status
     record["note"] = note or record.get("note", "")
@@ -936,7 +1093,41 @@ def transition_redemption(
                 product["stock"] = _as_int(product.get("stock")) + 1
             product["redeemed"] = max(0, _as_int(product.get("redeemed")) - 1)
         record["note"] = (note or "已取消并返还积分") + "（积分已返还）"
-    return True, f"记录状态已更新为 {status}"
+    # 只有"从非已发放变为已发放"才通知，重复点击不会重复打扰用户
+    notify = dict(record) if status == "已发放" and previous != "已发放" else None
+    return True, f"记录状态已更新为 {status}", notify
+
+
+def delete_redemption(
+    data: dict[str, Any],
+    record_id: str,
+    force: bool = False,
+) -> tuple[bool, str]:
+    """删除一条兑换记录。
+
+    删除只清理历史，**不会**退还积分或回补库存；待发放的记录还占着用户的积分，
+    因此默认拒绝删除，要求管理员先"取消并返还"，除非显式传 ``force``。
+
+    Args:
+        data: 数据字典（会被就地修改）。
+        record_id: 记录 ID。
+        force: 是否允许删除待发放记录。
+
+    Returns:
+        ``(是否成功, 提示文案)``。
+    """
+    records = data.get("redemptions") or []
+    index = next(
+        (position for position, item in enumerate(records) if item.get("id") == record_id),
+        None,
+    )
+    if index is None:
+        return False, "兑换记录不存在"
+    record = records[index]
+    if str(record.get("status") or "") == "待发放" and not force:
+        return False, "该记录还是待发放状态，删除会扣掉积分却不退还；请先点「取消并返还」，或勾选强制删除"
+    records.pop(index)
+    return True, f"已删除兑换记录（{record.get('product_name') or record_id}）"
 
 
 def shop_statistics(data: dict[str, Any]) -> dict[str, Any]:
@@ -1046,6 +1237,7 @@ __all__ = [
     "CheckinOutcome",
     "ConfirmOutcome",
     "PendingConfirm",
+    "HelpView",
     "Product",
     "ProductState",
     "REDEMPTION_STATUSES",
@@ -1054,12 +1246,16 @@ __all__ = [
     "Store",
     "adjust_user_points",
     "all_products",
+    "bind_user_email",
+    "build_help_view",
     "build_pending",
     "build_shop_view",
     "calculate_checkin_points",
     "decide_confirmation",
     "delete_product",
+    "delete_redemption",
     "find_products",
+    "help_text",
     "leaderboard",
     "list_redemptions",
     "list_users",
@@ -1072,7 +1268,9 @@ __all__ = [
     "product_state",
     "prompt_text",
     "public_settings",
+    "redemption_notice",
     "reorder_products",
+    "reward_rule_text",
     "shop_statistics",
     "transition_redemption",
     "upsert_product",

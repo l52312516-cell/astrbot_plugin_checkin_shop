@@ -44,6 +44,43 @@ async function post(endpoint, body) {
   return bridge.apiPost(endpoint, body || {});
 }
 
+// 插件页运行在 sandbox="allow-scripts allow-forms allow-downloads" 的 iframe 里，
+// 没有 allow-modals：window.confirm()/alert() 会被浏览器直接忽略（confirm 恒为
+// false），点了删除也永远进不去分支。所以二次确认一律走页面内对话框。
+function askConfirm({ title, message, confirmText = '确定', danger = true }) {
+  const modal = $('confirm-modal');
+  const okButton = $('confirm-ok');
+  const cancelButton = $('confirm-cancel');
+  $('confirm-title').textContent = title || '请确认';
+  $('confirm-text').textContent = message || '';
+  okButton.textContent = confirmText;
+  okButton.className = danger ? 'btn danger' : 'btn primary';
+  modal.hidden = false;
+  okButton.focus();
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      modal.hidden = true;
+      okButton.removeEventListener('click', onOk);
+      cancelButton.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+      resolve(value);
+    };
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false);
+    const onBackdrop = (event) => {
+      if (event.target === modal) finish(false);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') finish(false);
+    };
+    okButton.addEventListener('click', onOk);
+    cancelButton.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+  });
+}
+
 // ---------------------------------------------------------------- 概览与统计
 
 function renderStats() {
@@ -122,9 +159,9 @@ async function saveRewards() {
     streak_bonus_every: Number($('bonus-every').value || 0),
     streak_bonus_points: Number($('bonus-points').value || 0),
   };
-  await post('shop/rewards/save', payload);
+  const result = await post('shop/rewards/save', payload);
   await loadSummary();
-  say('打卡规则已保存', 'ok');
+  say(result.mirrored ? '打卡规则已保存（已同步到插件配置页）' : '打卡规则已保存', 'ok');
 }
 
 // ---------------------------------------------------------------- 展示设置
@@ -140,7 +177,7 @@ function fillSettingsForm(settings) {
 }
 
 async function saveSettings() {
-  await post('shop/settings/save', {
+  const result = await post('shop/settings/save', {
     shop_title: $('set-title').value,
     shop_subtitle: $('set-subtitle').value,
     leaderboard_size: Number($('set-board-size').value || 20),
@@ -150,7 +187,7 @@ async function saveSettings() {
     points_scope: $('set-scope').value,
   });
   await loadSummary();
-  say('设置已保存', 'ok');
+  say(result.mirrored ? '设置已保存（已同步到插件配置页）' : '设置已保存', 'ok');
 }
 
 // ---------------------------------------------------------------- 商品管理
@@ -293,11 +330,20 @@ async function saveProduct() {
 }
 
 async function deleteProduct(product) {
-  if (!window.confirm(`确定删除「${product.name}」？存在待发放记录时会改为下架。`)) return;
-  const result = await post('shop/products/delete', { id: product.id });
-  state.assetUrls = {};
-  await loadSummary();
-  say(result.message || '已删除', 'ok');
+  const confirmed = await askConfirm({
+    title: '删除商品',
+    message: `确定删除「${product.name}」吗？如果它还有待发放的兑换记录，会改为下架而不是删除，历史账目不会丢。`,
+    confirmText: '删除',
+  });
+  if (!confirmed) return;
+  try {
+    const result = await post('shop/products/delete', { id: product.id });
+    state.assetUrls = {};
+    await loadSummary();
+    say(result.message || '已删除', 'ok');
+  } catch (error) {
+    say(`删除失败：${error.message || error}`, 'error');
+  }
 }
 
 async function previewShop() {
@@ -413,6 +459,11 @@ async function loadRedemptions(page) {
       cancel.addEventListener('click', () => updateRedemption(record, '已取消', true));
       actions.appendChild(cancel);
     }
+    const remove = document.createElement('button');
+    remove.className = 'btn danger';
+    remove.textContent = '删除';
+    remove.addEventListener('click', () => deleteRedemption(record));
+    actions.appendChild(remove);
     cells[5].appendChild(actions);
     tbody.appendChild(row);
   });
@@ -420,15 +471,55 @@ async function loadRedemptions(page) {
 }
 
 async function updateRedemption(record, status, restore) {
-  const result = await post('shop/redemptions/status', {
-    id: record.id,
-    status,
-    restore,
-    note: '',
+  try {
+    const result = await post('shop/redemptions/status', {
+      id: record.id,
+      status,
+      restore,
+      note: '',
+    });
+    await loadRedemptions();
+    await loadSummary();
+    const notice = result.notice ? `，${result.notice}` : '';
+    const email = result.email ? `，${result.email}` : '';
+    say(`${result.message || '已更新'}${notice}${email}`, 'ok');
+  } catch (error) {
+    say(`操作失败：${error.message || error}`, 'error');
+  }
+}
+
+async function sendTestEmail() {
+  const hint = '测试邮件会发给插件配置页里的「兜底收件人」（没填就用 SMTP 账号）。';
+  try {
+    const result = await post('shop/email/test', {});
+    say(`${result.message || '测试邮件已发送'}（${hint}）`, 'ok');
+  } catch (error) {
+    say(`测试邮件失败：${error.message || error}`, 'error');
+  }
+}
+
+async function deleteRedemption(record) {
+  const pending = record.status === '待发放';
+  const message = pending
+    ? `「${record.product_name}」还是待发放状态。删除只清理这条记录，不会退还 ${record.cost} 积分、也不会回补库存；想要退积分请用「取消并返还」。`
+    : `确定删除「${record.product_name}」这条兑换记录吗？删除只清理历史，不影响积分与库存。`;
+  const confirmed = await askConfirm({
+    title: pending ? '强制删除待发放记录' : '删除兑换记录',
+    message,
+    confirmText: '删除',
   });
-  await loadRedemptions();
-  await loadSummary();
-  say(result.message || '已更新', 'ok');
+  if (!confirmed) return;
+  try {
+    const result = await post('shop/redemptions/delete', {
+      id: record.id,
+      force: pending,
+    });
+    await loadRedemptions();
+    await loadSummary();
+    say(result.message || '已删除', 'ok');
+  } catch (error) {
+    say(`删除失败：${error.message || error}`, 'error');
+  }
 }
 
 // ---------------------------------------------------------------- 初始化
@@ -503,6 +594,9 @@ async function boot() {
   });
   $('redeem-search').addEventListener('click', () => {
     loadRedemptions(1).catch((error) => say(error.message, 'error'));
+  });
+  $('email-test').addEventListener('click', () => {
+    sendTestEmail();
   });
   $('redeem-prev').addEventListener('click', () => {
     if (state.redeemPage > 1) {

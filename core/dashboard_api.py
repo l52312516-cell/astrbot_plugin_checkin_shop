@@ -65,11 +65,21 @@ def _page_args(payload: dict[str, Any]) -> tuple[int, int]:
 
 
 async def shop_summary(plugin) -> Any:
-    """页面首屏：设置 + 打卡规则 + 商品 + 统计。"""
+    """页面首屏：设置 + 打卡规则 + 商品 + 统计。
+
+    设置与规则按"插件配置页优先"合并，保证页面上显示的就是真正生效的值。
+    """
     data = await plugin.store.data(plugin._seed())
+    settings, rewards, _adopted, _snapshot = plugin._effective(
+        data.get("settings") or {},
+        data.get("rewards") or {},
+        data.get("config_snapshot") or {},
+    )
     return json_response(
         {
-            **business.public_settings(data),
+            "settings": settings,
+            "rewards": rewards,
+            "statistics": business.shop_statistics(data),
             "products": [item.to_dict() for item in business.all_products(data)],
         }
     )
@@ -137,7 +147,16 @@ async def rewards_save(plugin) -> Any:
         )
         return {"rewards": data["rewards"]}
 
-    return json_response(await plugin.store.mutate(handler, plugin._seed()))
+    result = await plugin.store.mutate(handler, plugin._seed())
+    # 回写插件配置页，避免"插件页改了、配置页还是旧值"的两套配置
+    mirrored = plugin.write_config(
+        {
+            plugin.REWARDS_TO_CONFIG[name]: value
+            for name, value in (result.get("rewards") or {}).items()
+            if name in plugin.REWARDS_TO_CONFIG
+        }
+    )
+    return json_response({**result, "mirrored": mirrored})
 
 
 async def settings_save(plugin) -> Any:
@@ -175,7 +194,15 @@ async def settings_save(plugin) -> Any:
         )
         return {"settings": data["settings"]}
 
-    return json_response(await plugin.store.mutate(handler, plugin._seed()))
+    result = await plugin.store.mutate(handler, plugin._seed())
+    mirrored = plugin.write_config(
+        {
+            plugin.SETTINGS_TO_CONFIG[name]: value
+            for name, value in (result.get("settings") or {}).items()
+            if name in plugin.SETTINGS_TO_CONFIG
+        }
+    )
+    return json_response({**result, "mirrored": mirrored})
 
 
 async def products_save(plugin) -> Any:
@@ -384,7 +411,7 @@ async def redemptions_list(plugin) -> Any:
 
 
 async def redemptions_status(plugin) -> Any:
-    """更新兑换记录状态。"""
+    """更新兑换记录状态；首次标记为已发放时通知用户（会话消息 + SMTP 邮件）。"""
     payload = await request.json(default={})
     if not isinstance(payload, dict):
         return error_response("请求内容必须是 JSON 对象")
@@ -402,6 +429,39 @@ async def redemptions_status(plugin) -> Any:
             bool(payload.get("restore", True)),
             now,
         )
+
+    ok, message, notify = await plugin.store.mutate(handler, plugin._seed())
+    if not ok:
+        return error_response(message)
+    notice = ""
+    email = ""
+    if notify is not None:
+        notice = await plugin.notify_redemption(notify)
+        email = await plugin.send_redemption_email(notify)
+    return json_response({"message": message, "notice": notice, "email": email})
+
+
+async def email_test(plugin) -> Any:
+    """发一封测试邮件，用来验证 SMTP 配置。"""
+    payload = await request.json(default={})
+    payload = payload if isinstance(payload, dict) else {}
+    ok, message = await plugin.send_test_email(str(payload.get("to") or ""))
+    if not ok:
+        return error_response(message or "测试邮件未发出")
+    return json_response({"message": message})
+
+
+async def redemptions_delete(plugin) -> Any:
+    """删除兑换记录（只清理历史，不返还积分，详见 business.delete_redemption）。"""
+    payload = await request.json(default={})
+    if not isinstance(payload, dict):
+        return error_response("请求内容必须是 JSON 对象")
+    record_id = str(payload.get("id") or "").strip()
+    if not record_id:
+        return error_response("缺少记录 id")
+
+    def handler(data: dict[str, Any]):
+        return business.delete_redemption(data, record_id, bool(payload.get("force", False)))
 
     ok, message = await plugin.store.mutate(handler, plugin._seed())
     if not ok:
@@ -450,6 +510,8 @@ class DashboardAPI:
             (f"/{PLUGIN_ID}/shop/users/adjust", users_adjust, ["POST"], "打卡商店：调整用户积分"),
             (f"/{PLUGIN_ID}/shop/redemptions", redemptions_list, ["POST"], "打卡商店：兑换记录"),
             (f"/{PLUGIN_ID}/shop/redemptions/status", redemptions_status, ["POST"], "打卡商店：更新兑换状态"),
+            (f"/{PLUGIN_ID}/shop/redemptions/delete", redemptions_delete, ["POST"], "打卡商店：删除兑换记录"),
+            (f"/{PLUGIN_ID}/shop/email/test", email_test, ["POST"], "打卡商店：发送测试邮件"),
             (f"/{PLUGIN_ID}/shop/preview", preview_card, ["GET"], "打卡商店：预览商店卡片"),
         )
         context = self.plugin.context

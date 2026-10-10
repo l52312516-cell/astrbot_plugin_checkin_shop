@@ -15,9 +15,9 @@ import time
 from typing import Any, Callable, Iterable
 
 try:  # 作为包被导入（测试）
-    from .business import ProductState, ShopView
+    from .business import HelpView, ProductState, ShopView
 except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 core/
-    from business import ProductState, ShopView  # type: ignore[no-redef]
+    from business import HelpView, ProductState, ShopView  # type: ignore[no-redef]
 
 logger = logging.getLogger("astrbot")
 
@@ -573,6 +573,107 @@ def render_board(
         canvas.close()
         return path
     return save_card(canvas, path)
+
+
+def render_help(
+    view: HelpView,
+    render_dir: str,
+    palette: CardPalette | None = None,
+    font_path: str = "",
+) -> str:
+    """渲染 ``/商店帮助`` 卡片。
+
+    Args:
+        view: 帮助内容（指令表、当前规则、兑换步骤）。
+        render_dir: 输出目录。
+        palette: 尺寸/字号配置。
+        font_path: 自定义字体路径。
+
+    Returns:
+        生成的 PNG 路径。
+    """
+    palette = palette or CardPalette()
+    if font_path:
+        palette.font_path = font_path
+    command_face = font_for(int(palette.body * 1.02), palette.font_path)
+    body_face = font_for(palette.body, palette.font_path)
+    small_face = font_for(palette.small, palette.font_path)
+
+    # 先估算高度：头部 + 三个区块 + 页脚
+    command_rows = len(view.commands)
+    total_height = (
+        palette.pad * 2
+        + int(palette.title * 1.35)
+        + int(palette.small * 1.5) * 3
+        + _section_height(palette, command_rows)
+        + _section_height(palette, len(view.rules))
+        + _section_height(palette, len(view.steps))
+        + int(palette.small * 2.0)
+    )
+    canvas, draw = _new_canvas(palette.width, total_height)
+    y = _draw_header(
+        palette,
+        canvas,
+        draw,
+        view.title,
+        "帮助",
+        view.subtitle,
+    )
+
+    name_column = max(text_width(command_face, name) for name, _ in view.commands) + 28
+    y = _draw_section(palette, draw, y, "指令", COLOR_ACCENT)
+    for name, desc in view.commands:
+        draw.text((palette.pad, y), name, font=command_face, fill=COLOR_TEXT)
+        draw.text(
+            (palette.pad + name_column, y + 3),
+            ellipsize(small_face, desc, palette.content_width - name_column),
+            font=small_face,
+            fill=COLOR_MUTED,
+        )
+        y += int(palette.body * 1.75)
+
+    y = _draw_section(palette, draw, y + 8, "当前规则", COLOR_OK)
+    for line in view.rules:
+        draw.text((palette.pad, y), "·", font=body_face, fill=COLOR_OK)
+        wrapped = wrap_text(body_face, line, palette.content_width - 30, max_lines=2)
+        for piece in wrapped:
+            draw.text((palette.pad + 30, y), piece, font=body_face, fill=COLOR_TEXT)
+            y += int(palette.body * 1.55)
+
+    y = _draw_section(palette, draw, y + 8, "怎么兑换", COLOR_LOCK)
+    for index, line in enumerate(view.steps, 1):
+        draw.text((palette.pad, y), f"{index}.", font=body_face, fill=COLOR_LOCK)
+        for piece in wrap_text(body_face, line, palette.content_width - 44, max_lines=2):
+            draw.text((palette.pad + 44, y), piece, font=body_face, fill=COLOR_TEXT)
+            y += int(palette.body * 1.55)
+
+    if view.footer:
+        y += 6
+        draw.text(
+            (palette.pad, y),
+            ellipsize(small_face, view.footer, palette.content_width),
+            font=small_face,
+            fill=COLOR_MUTED,
+        )
+
+    payload = "|".join(
+        [
+            view.title,
+            ",".join(f"{name}:{desc}" for name, desc in view.commands),
+            ",".join(view.rules),
+            ",".join(view.steps),
+        ]
+    )
+    path = output_path("help", payload, render_dir)
+    if os.path.exists(path):
+        canvas.close()
+        return path
+    return save_card(canvas, path)
+
+
+def _section_height(palette: CardPalette, rows: int) -> int:
+    """估算一个区块占用的高度（用于预分配画布）。"""
+    return int(palette.section * 1.5) + max(1, rows) * int(palette.body * 1.75) + 8
 
 
 def shop_view_payload(view: ShopView) -> str:

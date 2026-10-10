@@ -13,7 +13,7 @@
       "自定义列表"
     ],
     "default": "fixed",
-    "hint": "仅作为首次初始化 shop.json 的默认值；之后请在插件页「打卡规则」里修改。"
+    "hint": "和插件页「打卡规则」里的积分模式是同一份配置：这里保存会热重载插件并覆盖插件页，插件页保存会回写到这里。"
   },
   "checkin_fixed": {
     "description": "固定积分（每次打卡获得）",
@@ -133,6 +133,70 @@
     "description": "商店副标题",
     "type": "string",
     "default": "引用确认消息并回复 是/否 即可完成兑换"
+  },
+  "email_enabled": {
+    "description": "启用兑换发放邮件通知",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，在插件页把兑换记录标记为「已发放」时，会给用户发一封 SMTP 邮件（同时仍会私聊/会话通知）。"
+  },
+  "email_smtp_host": {
+    "description": "SMTP 服务器",
+    "type": "string",
+    "default": "",
+    "hint": "例如 smtp.qq.com、smtp.163.com、smtp.gmail.com。"
+  },
+  "email_smtp_port": {
+    "description": "SMTP 端口",
+    "type": "int",
+    "default": 465,
+    "hint": "SSL 常用 465，STARTTLS 常用 587。"
+  },
+  "email_smtp_encryption": {
+    "description": "SMTP 加密方式",
+    "type": "string",
+    "options": [
+      "ssl",
+      "starttls",
+      "none"
+    ],
+    "labels": [
+      "SSL/TLS（465）",
+      "STARTTLS（587）",
+      "不加密（25，不推荐）"
+    ],
+    "default": "ssl"
+  },
+  "email_smtp_user": {
+    "description": "SMTP 账号",
+    "type": "string",
+    "default": "",
+    "hint": "通常填完整邮箱地址。"
+  },
+  "email_smtp_password": {
+    "description": "SMTP 密码 / 授权码",
+    "type": "string",
+    "secret": true,
+    "default": "",
+    "hint": "QQ 邮箱、163 等要填「授权码」，不是登录密码。"
+  },
+  "email_sender": {
+    "description": "发件人地址",
+    "type": "string",
+    "default": "",
+    "hint": "留空则用 SMTP 账号。"
+  },
+  "email_recipient_suffix": {
+    "description": "收件人默认后缀",
+    "type": "string",
+    "default": "@qq.com",
+    "hint": "用户没绑定邮箱时，用「QQ 号 + 这个后缀」当收件地址；留空表示不做这种推断。"
+  },
+  "email_fallback_to": {
+    "description": "兜底收件人",
+    "type": "string",
+    "default": "",
+    "hint": "推不出用户邮箱时把邮件发到这里（例如管理员邮箱）；留空则该次不发。"
   },
   "render_width": {
     "description": "卡片宽度（像素）",

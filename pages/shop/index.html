@@ -36,6 +36,7 @@
         <div class="card">
           <h2>打卡积分规则</h2>
           <p class="muted">保存后立即生效；每天按重置小时判定"新的一天"。</p>
+          <p class="muted">这里的积分模式与 AstrBot 插件配置页里的"打卡积分模式"是同一份配置：在这里保存会同步写回配置页；在配置页保存会热重载插件并覆盖这里（配置页优先）。</p>
           <div class="form-grid">
             <label>
               <span>积分模式</span>
@@ -145,7 +146,17 @@
 
       <section class="panel" data-panel="redemptions">
         <div class="card">
-          <h2>兑换记录</h2>
+          <div class="card-head">
+            <h2>兑换记录</h2>
+            <div class="row-end">
+              <button id="email-test" class="btn ghost" type="button">发送测试邮件</button>
+            </div>
+          </div>
+          <p class="muted">
+            标记「已发放」时会私聊/会话通知用户；如果开启了邮件通知，还会按 SMTP 配置给用户发一封发放邮件。
+            收件地址优先用用户绑定的邮箱（<code>/绑定邮箱 邮箱</code>），其次用「QQ 号 + 配置的默认后缀」，最后用配置里的兜底收件人。
+            SMTP 服务器、账号、授权码都在 AstrBot 插件配置页里填，「发送测试邮件」可以先用兜底收件人验证配置。
+          </p>
           <div class="filters">
             <select id="redeem-status">
               <option value="">全部状态</option>
@@ -288,6 +299,19 @@
         <div class="row-end">
           <button id="a-cancel" class="btn ghost" type="button">取消</button>
           <button id="a-save" class="btn primary" type="button">确认调整</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 插件页跑在 sandbox 不带 allow-modals 的 iframe 里，window.confirm 会被
+         浏览器直接忽略（永远返回 false），所以二次确认必须用页面内对话框。 -->
+    <div class="modal" id="confirm-modal" hidden>
+      <div class="modal-card small" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h3 id="confirm-title">请确认</h3>
+        <p id="confirm-text" class="muted"></p>
+        <div class="row-end">
+          <button id="confirm-cancel" class="btn ghost" type="button">取消</button>
+          <button id="confirm-ok" class="btn danger" type="button">确定</button>
         </div>
       </div>
     </div>

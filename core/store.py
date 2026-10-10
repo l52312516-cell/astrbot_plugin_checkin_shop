@@ -57,6 +57,8 @@ def default_data() -> dict[str, Any]:
         "users": {},
         "products": [],
         "redemptions": [],
+        # 上一次把插件配置页同步进运行数据时的配置值（见 main.py 的 _effective）
+        "config_snapshot": {},
     }
 
 
@@ -98,6 +100,8 @@ def migrate(data: Any) -> dict[str, Any]:
     result["redemptions"] = (
         [dict(item) for item in redemptions if isinstance(item, dict)] if isinstance(redemptions, list) else []
     )
+    snapshot = data.get("config_snapshot")
+    result["config_snapshot"] = dict(snapshot) if isinstance(snapshot, dict) else {}
     for user in result["users"].values():
         _merge_defaults(
             user,
@@ -110,6 +114,7 @@ def migrate(data: Any) -> dict[str, Any]:
                 "last_checkin_date": "",
                 "history": [],
                 "nickname": "",
+                "email": "",
                 "updated_at": 0.0,
             },
         )
@@ -261,7 +266,9 @@ class Store:
             Exception: 原样抛出 ``handler`` 的异常。
         """
         async with self._get_lock():
-            data = (await self.open(seed)) if self._data is None else self._data
+            # 这里必须用不再取锁的 _open_locked：asyncio.Lock 不可重入，
+            # 调 open() 会二次抢同一把锁，在"数据还没加载"时永久卡死。
+            data = self._open_locked(seed) if self._data is None else self._data
             snapshot = copy.deepcopy(data)
             result = handler(snapshot)
             self._warn_if_externally_changed()
@@ -294,3 +301,11 @@ class Store:
     def replace_memory(self, data: dict[str, Any]) -> None:
         """直接替换内存数据（仅供测试与迁移使用）。"""
         self._data = migrate(data)
+
+    def snapshot(self) -> dict[str, Any]:
+        """同步读取当前内存数据的引用（只读用途，例如算收件地址）。
+
+        Returns:
+            内存数据；尚未加载时返回空字典。调用方不应修改返回值。
+        """
+        return self._data if isinstance(self._data, dict) else {}
