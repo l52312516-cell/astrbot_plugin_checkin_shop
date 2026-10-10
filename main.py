@@ -103,6 +103,14 @@ SETTINGS_TO_CONFIG = {target: key for key, target in CONFIG_SETTINGS}
 # 其他平台不去猜格式，直接退回用户发起兑换时的会话。
 PRIVATE_SESSION_TYPES = {"aiocqhttp": "FriendMessage"}
 
+# 只发了指令名、没有唤醒前缀（也没 @ 机器人）的消息。AstrBot 的标准指令受
+# wake_prefix 制约，这类消息会被直接忽略、机器人毫无反应——新用户最容易这么发。
+# 正则过滤器不受 wake_prefix 制约，所以这里能兜住它并回一句用法说明。
+BARE_COMMAND_RE = re.compile(
+    r"^[\s]*(打卡|签到|商店|我的积分|积分|积分榜|排行榜|商店帮助|打卡帮助"
+    r"|兑换商品|兑换|绑定邮箱|我的邮箱)[\s]*[!！。.、~～,，?？]*$"
+)
+
 
 def plugin_data_dir() -> str:
     """解析插件数据目录，优先使用 AstrBot 的 plugin_data。"""
@@ -574,12 +582,24 @@ class CheckinShopPlugin(Star):
         user_key = self._user_key(event)
         now = time.time()
         # 顺手把插件配置页的规则同步进快照，配置页改完即使没热重载也立刻生效
-        outcome = await self.store.mutate(
-            lambda data: business.perform_checkin(
-                self._apply_config(data), user_key, self._sender_name(event), now
-            ),
-            self._seed(),
-        )
+        try:
+            outcome = await self.store.mutate(
+                lambda data: business.perform_checkin(
+                    self._apply_config(data), user_key, self._sender_name(event), now
+                ),
+                self._seed(),
+            )
+        except Exception as exc:
+            # 打卡出错时必须说出来：静默失败（"发了指令没反应"）最难排查
+            logger.exception(
+                "[打卡商店] 打卡失败 user=%s session=%s",
+                user_key,
+                self._session_key(event),
+            )
+            yield event.plain_result(
+                f"打卡失败：{exc}\n请把这条消息发给管理员，AstrBot 日志里有完整堆栈。"
+            )
+            return
         if not outcome.success:
             yield event.plain_result(f"{outcome.message}\n当前积分：{outcome.total}")
             return
@@ -589,9 +609,30 @@ class CheckinShopPlugin(Star):
             f"连签 {outcome.streak} 天 · 当前积分 {outcome.total}\n"
             "发送 /商店 看看能换点什么吧～"
         )
+        # 有了这行，'指令没反应' 就能一眼分清是"插件没跑到"还是"发出去了但没到用户手上"
+        logger.info(
+            "[打卡商店] 打卡成功 user=%s session=%s points=%s streak=%s",
+            user_key,
+            self._session_key(event),
+            outcome.points,
+            outcome.streak,
+        )
         card = await self._points_card(user_key, self._sender_name(event))
         async for result in self._send(event, text, card):
             yield result
+
+    @filter.regex(BARE_COMMAND_RE)
+    async def on_bare_command(self, event: AstrMessageEvent):
+        """兜住"没带唤醒前缀的裸指令"，回一句用法说明而不是装死。
+
+        AstrBot 的标准指令只在消息以 wake_prefix 开头（或 @ 了机器人 / 私聊）时才会
+        触发，新用户很容易直接发「打卡」，此时命令过滤器根本不匹配、机器人毫无反应。
+        正则过滤器不受 wake_prefix 约束，所以这里能给出提示。
+        """
+        if getattr(event, "is_at_or_wake_command", False):
+            return  # 标准指令已经接管，别重复回复
+        name = str(event.get_message_str() or "").strip().strip("!！。.、~～,，?？")
+        yield event.plain_result(business.bare_command_hint(name))
 
     async def _points_card(self, user_key: str, fallback_name: str = ""):
         """返回"我的积分"卡片渲染回调（闭包，供 :meth:`_send` 调用）。"""
@@ -815,14 +856,8 @@ class CheckinShopPlugin(Star):
             self._pendings, user_key, session, time.time()
         )
         if pending is None:
-            if timed_out:
-                yield event.plain_result(
-                    "上一次兑换请求已超时，请重新发送 /兑换商品 <名称>"
-                )
-            else:
-                yield event.plain_result(
-                    "当前没有等待确认的兑换请求，请先发送 /兑换商品 <名称>"
-                )
+            # 这个用户根本没有待确认的兑换请求：这条"好/不"是普通聊天（或别人的事），
+            # 绝不能插一句"当前没有等待确认的兑换请求"——静默放行。
             return
         quote_text, quote_id, quote_sender = self._quote_info(event)
         decision = business.decide_confirmation(
@@ -840,6 +875,9 @@ class CheckinShopPlugin(Star):
         if pending.token in self._handled_tokens:
             return
         if not decision.ok and not decision.cancelled:
+            # 超时或引用没对上：只提示、不动数据；过期请求顺手清掉，有效请求留着等正确引用
+            if timed_out:
+                self._pendings.pop(pending.token, None)
             yield event.plain_result(decision.message)
             return
         self._handled_tokens.add(pending.token)

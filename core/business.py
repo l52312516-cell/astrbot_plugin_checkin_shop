@@ -200,6 +200,21 @@ class ConfirmOutcome:
     timed_out: bool = False
 
 
+def bare_command_hint(name: str) -> str:
+    """提示用户"要先唤醒机器人"（针对没带唤醒前缀的裸指令）。
+
+    Args:
+        name: 用户发来的指令名（不含前缀）。
+
+    Returns:
+        一句可以直接发给用户的提示。
+    """
+    return (
+        f"要用「{name}」得先唤醒机器人：发送 /{name}，"
+        f"或者先 @我 再发「{name}」（前缀是 AstrBot 的唤醒词，可能被配成别的）。"
+    )
+
+
 def user_key_for(platform: str, user_id: str) -> str:
     """生成用户主键。"""
     platform = (platform or "unknown").strip() or "unknown"
@@ -598,7 +613,13 @@ def pick_pending(
     session_key: str,
     now: float,
 ) -> tuple[PendingConfirm | None, bool]:
-    """挑出当前用户在当前会话里的有效待确认请求。
+    """挑出当前用户的待确认请求。
+
+    优先取"同一会话 + 同一用户"的最新一条；如果平台给出的会话标识在两条消息之间变了
+    （少数适配器会这样），或者用户在另一个会话里确认，就退化成"只看用户"，
+    避免明明有待确认请求却回一句"没有等待确认"。
+
+    这里**不删除**任何请求：过期请求要留给调用方判断引用是否匹配，只有匹配上才提示超时。
 
     Args:
         pendings: 待确认请求表。
@@ -607,20 +628,22 @@ def pick_pending(
         now: 当前时间戳。
 
     Returns:
-        ``(请求或 None, 是否因为超时被丢弃)``。
+        ``(请求或 None, 是否已过期)``；该用户没有任何待确认请求时是 ``(None, False)``。
     """
-    found: PendingConfirm | None = None
-    timed_out = False
-    for key, pending in list(pendings.items()):
-        if pending.user_key != user_key or pending.session_key != session_key:
+    exact: PendingConfirm | None = None
+    loose: PendingConfirm | None = None
+    for pending in pendings.values():
+        if pending.user_key != user_key:
             continue
-        if pending.expires_at <= now:
-            pendings.pop(key, None)
-            timed_out = True
-            continue
-        if found is None or pending.created_at >= found.created_at:
-            found = pending
-    return found, timed_out
+        if session_key and pending.session_key == session_key:
+            if exact is None or pending.created_at >= exact.created_at:
+                exact = pending
+        elif loose is None or pending.created_at >= loose.created_at:
+            loose = pending
+    chosen = exact if exact is not None else loose
+    if chosen is None:
+        return None, False
+    return chosen, chosen.expires_at <= now
 
 
 def match_confirm_reply(
@@ -680,26 +703,46 @@ def decide_confirmation(
         quote_sender_id: 被引用消息发送者。
         bot_id: 机器人自身 ID。
         pending_ids: 本次会话记录过的机器人消息 ID。
-        timed_out: 是否已有请求刚过期被清理。
+        timed_out: 这条待确认请求是否已过期。
 
     Returns:
         处理结果；``handled=False`` 表示这条消息与本插件无关，应放行。
     """
     stripped = (text or "").strip()
     decision = parse_decision(stripped)
-    if pending is None:
-        if decision == "unknown":
-            return ConfirmOutcome(handled=False, ok=False, message="")
-        if timed_out:
-            return ConfirmOutcome(
-                handled=True, ok=False, timed_out=True, message="上一次兑换请求已超时，请重新发送 /兑换商品 <名称>"
-            )
-        return ConfirmOutcome(
-            handled=True, ok=False, message="当前没有等待确认的兑换请求，请先发送 /兑换商品 <名称>"
-        )
-    if decision == "unknown":
+    if pending is None or decision == "unknown":
+        # 没有等待确认的兑换请求时，群里的每一句"好/不/ok"都不该被机器人插一句
+        # "当前没有等待确认的兑换请求"——这类消息一律放行给其他指令 / 大模型。
         return ConfirmOutcome(handled=False, ok=False, message="")
-    if not match_confirm_reply(pending, quote_text, quote_id, quote_sender_id, bot_id, pending_ids):
+    matched = match_confirm_reply(
+        pending, quote_text, quote_id, quote_sender_id, bot_id, pending_ids
+    )
+    if timed_out:
+        if not matched:
+            return ConfirmOutcome(handled=False, ok=False, message="")
+        return ConfirmOutcome(
+            handled=True,
+            ok=False,
+            timed_out=True,
+            product_name=pending.product_name,
+            message=(
+                f"上一次兑换「{pending.product_name}」的确认已超时，"
+                f"请重新发送 /兑换商品 {pending.product_name}"
+            ),
+        )
+    if not matched:
+        if not (quote_text or "").strip() and not (quote_id or "").strip():
+            # 有待确认请求、但这条回复没有引用任何消息：告诉他怎么确认，别只说"不匹配"
+            return ConfirmOutcome(
+                handled=True,
+                ok=False,
+                product_name=pending.product_name,
+                message=(
+                    f"如果要确认兑换「{pending.product_name}」，"
+                    "请「引用」机器人那条确认消息再回复 是/否；"
+                    f"也可以重新发送 /兑换商品 {pending.product_name}"
+                ),
+            )
         return ConfirmOutcome(
             handled=True,
             ok=False,
@@ -1246,6 +1289,7 @@ __all__ = [
     "Store",
     "adjust_user_points",
     "all_products",
+    "bare_command_hint",
     "bind_user_email",
     "build_help_view",
     "build_pending",
