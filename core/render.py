@@ -25,8 +25,10 @@ import time
 from typing import Any, Callable, Iterable
 
 try:  # 作为包被导入（测试）
+    from . import business
     from .business import HelpView, ProductState, ShopView
 except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 core/
+    import business  # type: ignore[no-redef]
     from business import HelpView, ProductState, ShopView  # type: ignore[no-redef]
 
 logger = logging.getLogger("astrbot")
@@ -530,10 +532,22 @@ def render_shop(
         draw,
         view.title or "积分商店",
         f"我的积分 {view.points}",
-        view.subtitle or f"{view.user_name} · 回复 {palette.command('兑换商品 <名称>')} 进行兑换",
+        view.subtitle or f"{view.user_name} · 回复 {palette.command('兑换商品')} 看商品编号",
     )
 
-    index = 0
+    # 编号列宽按最宽的那一个编号预留（商品超过 99 个时是三位数），
+    # 否则三位编号会压到商品名上。
+    ordered = list(view.redeemable) + list(view.locked)
+    number_labels = [
+        item.number or business.product_number(position)
+        for position, item in enumerate(ordered, 1)
+    ]
+    number_width = (
+        text_width(tiny_face, max(number_labels, key=len))
+        if number_labels
+        else text_width(tiny_face, "00")
+    )
+    shown = 0
     for title, color, items in sections:
         y = _draw_section(palette, draw, y, title, color, len(items))
         if not items:
@@ -547,7 +561,8 @@ def render_shop(
             )
             continue
         for item in items:
-            index += 1
+            label = number_labels[shown] if shown < len(number_labels) else ""
+            shown += 1
             product = item.product
             height = row_height(item)
             _rounded(
@@ -582,9 +597,9 @@ def render_shop(
                     )
                 inner_x += thumb + palette.gap
 
-            # 编号跨区块连续（01、02、03、04…），避免两个区块都从 01 开始
-            draw.text((inner_x, y + top_pad), f"{index:02d}", font=tiny_face, fill=COLOR_FAINT)
-            text_x = inner_x + text_width(tiny_face, "00") + palette.gap
+            # 编号跨区块连续（01、02、03、04…），且与后台/菜单同号
+            draw.text((inner_x, y + top_pad), label, font=tiny_face, fill=COLOR_FAINT)
+            text_x = inner_x + number_width + palette.gap
             right_x = palette.width - pad - palette.gap
 
             price_text = f"{product.cost} 积分"
@@ -1094,9 +1109,13 @@ def shop_view_payload(view: ShopView) -> str:
         "",
         f"● 可兑换（{len(view.redeemable)}）",
     ]
+    ordered = list(view.redeemable) + list(view.locked)
+    numbers: dict[str, str] = {}
+    for position, item in enumerate(ordered, 1):
+        numbers[item.product.id] = item.number or business.product_number(position)
     for item in view.redeemable:
         lines.append(
-            f"· {item.product.name} — {item.product.cost} 积分"
+            f"{numbers[item.product.id]} {item.product.name} — {item.product.cost} 积分"
             + (f"（剩余 {item.product.stock} 件）" if item.product.stock is not None else "")
         )
     if not view.redeemable:
@@ -1105,7 +1124,9 @@ def shop_view_payload(view: ShopView) -> str:
     lines.append(f"○ 暂不可兑换（{len(view.locked)}）")
     for item in view.locked:
         extra = f"还差 {item.deficit} 分" if item.reason == "积分不足" else item.reason
-        lines.append(f"· {item.product.name} — {item.product.cost} 积分（{extra}）")
+        lines.append(
+            f"{numbers[item.product.id]} {item.product.name} — {item.product.cost} 积分（{extra}）"
+        )
     if not view.locked:
         lines.append("· 暂无")
     return "\n".join(lines)

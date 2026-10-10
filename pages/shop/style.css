@@ -751,6 +751,24 @@ input[type="file"] {
   min-width: 160px;
 }
 
+/* 商品页的筛选栏：搜索框吃掉剩余宽度，两个下拉固定宽度，计数靠右 */
+.filters #product-search {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
+.filters #product-category,
+.filters #product-status {
+  min-width: 130px;
+}
+
+.filters #product-count {
+  margin-left: auto;
+  align-self: center;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
 /* ---------------------------------------------------------------- 表格 */
 
 .table-wrap {
@@ -815,6 +833,98 @@ input[type="file"] {
   font-weight: 500;
 }
 
+/* 序号列：与商店图/用户端菜单同一套编号，等宽数字避免跳宽 */
+.table th:first-child,
+.table td.cell-number {
+  width: 56px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* 可排序表头：整格可点，箭头指示当前列与方向 */
+.table th.sortable {
+  padding: 0;
+}
+
+.table th.sortable .th-sort {
+  display: block;
+  width: 100%;
+  padding: var(--sp-3);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.table th.sortable.num .th-sort {
+  text-align: right;
+}
+
+.table th.sortable:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+.table th.sortable.is-sorted {
+  color: var(--accent-text);
+}
+
+.table th.sortable.is-sorted .th-sort::after {
+  content: " ▲";
+  font-size: 10px;
+}
+
+.table th.sortable.is-sorted[aria-sort="descending"] .th-sort::after {
+  content: " ▼";
+}
+
+.table th.sortable .th-sort:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 账单流水：收支用颜色区分，金额列本来就右对齐等宽 */
+.table td.delta-in {
+  color: var(--ok-text);
+  font-weight: 500;
+}
+
+.table td.delta-out {
+  color: var(--warn-text);
+  font-weight: 500;
+}
+
+.filters #ledger-start,
+.filters #ledger-end {
+  min-width: 140px;
+}
+
+.filters #ledger-summary {
+  margin-left: auto;
+  align-self: center;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* 状态 pill 做成按钮：点一下就能上下架 */
+.tag-button {  border: 1px solid transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 2px 10px;
+}
+
+.tag-button:hover:not(:disabled) {
+  border-color: currentColor;
+}
+
+.tag-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 /* 长名称/长商品名的溢出保护：表格单元格的 max-width 在自动布局里不可靠，
    所以把文字包一层 block 再裁剪。 */
 .cell-clip {
@@ -835,6 +945,7 @@ input[type="file"] {
   align-items: center;
   justify-content: flex-end;
   gap: 2px;
+  flex-wrap: wrap;
 }
 
 .table img.thumb {
@@ -1002,6 +1113,29 @@ input[type="file"] {
   justify-content: flex-end;
   gap: var(--sp-2);
   margin-top: var(--sp-4);
+}
+
+/* 商品行有 4 个操作（上移/下移/编辑/删除）+ 序号列，原带宽会把操作列挤成竖排 */
+.table {
+  min-width: 880px;
+}
+
+.table th.actions,
+.table td.cell-actions {
+  width: 150px;
+  white-space: nowrap;
+}
+
+.row-actions {
+  flex-wrap: nowrap;
+}
+
+/* 上移/下移用箭头图标就够了，省下的宽度留给"编辑/删除" */
+.row-actions [data-action="up"],
+.row-actions [data-action="down"] {
+  padding: 2px 6px;
+  font-size: 14px;
+  line-height: 1.2;
 }
 
 /* ---------------------------------------------------------------- 响应式 */

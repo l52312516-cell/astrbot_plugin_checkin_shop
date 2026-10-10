@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import copy
+import csv
+import io
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -37,6 +40,16 @@ REASON_POINTS = "积分不足"
 # 不参与消息匹配：真正能不能触发指令仍然由 AstrBot 的唤醒前缀（wake_prefix）决定。
 DEFAULT_DISPLAY_PREFIX = "/"
 DISPLAY_PREFIX_MAX = 8
+
+# 账单流水的类型。每一次积分变动都会落一条，便于对账。
+LEDGER_CHECKIN = "打卡"
+LEDGER_REDEEM = "兑换"
+LEDGER_REFUND = "返还"
+LEDGER_ADJUST = "调整"
+LEDGER_TYPES = (LEDGER_CHECKIN, LEDGER_REDEEM, LEDGER_REFUND, LEDGER_ADJUST)
+# 流水条数上限：只保留最近这些条，避免 shop.json 无限增长
+# （单条约 200 字节，1000 条约 200KB，落盘仍然是"整份 JSON 重写"的原子写）。
+LEDGER_LIMIT = 1000
 
 
 def normalize_display_prefix(value: Any) -> str:
@@ -93,10 +106,24 @@ def _as_optional_int(value: Any) -> int | None:
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
+    """把任意值转成 float，失败时返回默认值。"""
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+# 用户可能这么发编号：2 / 02 / #2 / 第2个 / NO.2
+NUMBER_INPUT_RE = re.compile(r"^(?:#|no\.?|第|编号)?\s*(\d{1,3})\s*(?:号|个)?$", re.IGNORECASE)
+
+
+def _number_input(text: str) -> int | None:
+    """把"用户想指第几个商品"的输入解析成正整数；不是编号就返回 ``None``。"""
+    match = NUMBER_INPUT_RE.match((text or "").strip())
+    if match is None:
+        return None
+    value = int(match.group(1))
+    return value if value > 0 else None
 
 
 @dataclass
@@ -175,6 +202,8 @@ class ProductState:
     deficit: int = 0
     user_redeemed: int = 0
     remaining_quota: int | None = None
+    # 展示编号（"01"），与商店图、用户端编号菜单、后台商品表同一套
+    number: str = ""
 
 
 @dataclass
@@ -296,6 +325,29 @@ def all_products(data: dict[str, Any]) -> list[Product]:
     return products
 
 
+def product_number(index: int) -> str:
+    """展示编号：``01``、``02``……（超过两位就原样输出，不截断）。
+
+    用户端菜单、商店图、后台商品表三处共用同一个编号，避免"图上写 2、菜单说 3"。
+    """
+    return f"{index:02d}" if index < 100 else str(index)
+
+
+def numbered_products(
+    data: dict[str, Any],
+    include_disabled: bool = True,
+) -> list[tuple[str, Product]]:
+    """按展示顺序返回 ``(编号, 商品)``。
+
+    编号按**全量**商品计算（含下架），所以下架/上架不会让其它商品的编号漂移；
+    用户照着菜单发的编号因此在后台调整上下架后仍然指向同一个商品。
+    """
+    pairs = [(product_number(index), product) for index, product in enumerate(all_products(data), 1)]
+    if include_disabled:
+        return pairs
+    return [(number, product) for number, product in pairs if product.enabled]
+
+
 def product_state(data: dict[str, Any], product: Product, user_key: str) -> ProductState:
     """计算某个商品对某个用户是否可兑换。"""
     user = data.get("users", {}).get(user_key) or {}
@@ -343,11 +395,14 @@ def build_shop_view(
     """构造商店视图（用户在群里只看到上架商品，后台可看全部）。"""
     settings = data.get("settings", {})
     user = data.get("users", {}).get(user_key) or {}
-    items = [
-        product_state(data, product, user_key)
-        for product in all_products(data)
-        if include_disabled or product.enabled
-    ]
+    items = []
+    for number, product in numbered_products(data):
+        if not include_disabled and not product.enabled:
+            continue
+        state = product_state(data, product, user_key)
+        # 编号按全量商品算（下架不占位漂移），所以这里只挑出自己要显示的
+        state.number = number
+        items.append(state)
     return ShopView(
         user_key=user_key,
         user_name=str(user.get("nickname") or user.get("user_id") or user_key),
@@ -356,6 +411,54 @@ def build_shop_view(
         subtitle=str(settings.get("shop_subtitle") or ""),
         items=items,
     )
+
+
+def catalog_text(
+    data: dict[str, Any],
+    user_key: str,
+    prefix: str = "",
+    max_lines: int = 40,
+) -> str:
+    """用户端编号菜单：把上架商品列成"编号 + 名称 + 价格"的纯文本。
+
+    纯文本而不是图片：菜单会被频繁翻出来看，出图既慢又多一条图片消息；
+    编号与商店图、后台商品表完全一致，用户照着任意一处发都能兑换。
+
+    Args:
+        data: 数据字典。
+        user_key: 用户主键（只为显示余额与"还差多少"）。
+        prefix: 展示用指令前缀；留空则取设置里的。
+        max_lines: 最多列多少个商品，超出只提示数量。
+
+    Returns:
+        可直接回复的多行文本。
+    """
+    settings = data.get("settings") or {}
+    prefix = normalize_display_prefix(prefix) if prefix else display_prefix(settings)
+
+    def cmd(text: str) -> str:
+        return f"{prefix}{text}"
+
+    user = data.get("users", {}).get(user_key) or {}
+    points = _as_int(user.get("points"))
+    title = str(settings.get("shop_title") or "积分商店")
+    items = numbered_products(data, include_disabled=False)
+    lines = [f"{title} · 商品编号（当前 {points} 积分）"]
+    if not items:
+        lines.append("")
+        lines.append("现在还没有上架的商品，等管理员上架后再来看看吧～")
+        return "\n".join(lines)
+    for number, product in items[:max_lines]:
+        state = product_state(data, product, user_key)
+        suffix = ""
+        if not state.redeemable:
+            suffix = f"（还差 {state.deficit} 分）" if state.reason == REASON_POINTS else f"（{state.reason}）"
+        lines.append(f"{number} {product.name} — {product.cost} 积分{suffix}")
+    lines.append("")
+    if len(items) > max_lines:
+        lines.append(f"还有 {len(items) - max_lines} 个商品没列出来，发送 {cmd('商店')} 看图。")
+    lines.append(f"把编号发给我就能兑换，例如：{cmd('兑换 1')}")
+    return "\n".join(lines)
 
 
 def reward_rule_text(rewards: dict[str, Any]) -> str:
@@ -420,9 +523,12 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
         commands=[
             (cmd("打卡"), f"每天一次，按后台配置发放积分（别名 {cmd('签到')}）"),
             (cmd("商店"), "查看自己能兑换和暂时换不了的商品"),
+            (
+                cmd("兑换商品"),
+                f"不带编号：列出商品编号；带上编号直接兑换（别名 {cmd('兑换')}）",
+            ),
             (cmd("我的积分"), f"查看积分、连签天数与最近记录（别名 {cmd('积分')}）"),
             (cmd("积分榜"), f"查看本平台积分排行（别名 {cmd('排行榜')}）"),
-            (cmd("兑换商品 名称"), f"发起兑换，机器人会问你是否确认（别名 {cmd('兑换')}）"),
             (
                 cmd("绑定邮箱 邮箱"),
                 "绑定收件邮箱（发放邮件用）；不带参数查看，填「解绑」清除",
@@ -431,9 +537,9 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
         ],
         rules=rules,
         steps=[
-            f"发送 {cmd('兑换商品 可乐')}（名称可以是商品的一部分）",
-            "机器人回复确认提示后，引用那条消息回复 是",
-            "积分与库存当场扣除，管理员在后台标记发放状态",
+            f"发送 {cmd('兑换商品')} 看商品编号（也可以直接写商品名）",
+            f"发送 {cmd('兑换')} 1 兑换 1 号商品，机器人会问你是否确认",
+            "引用那条确认消息回复 是，积分与库存当场扣除",
             "需要取消时引用确认消息回复 否",
         ],
         footer="商品由管理员在 AstrBot 后台的插件页里配置。",
@@ -451,19 +557,43 @@ def help_text(view: HelpView) -> str:
 
 
 def find_products(data: dict[str, Any], name: str) -> tuple[list[Product], str]:
-    """按名称模糊搜索商品。
+    """按编号或名称查找商品。
+
+    编号（``2``、``02``、``#2``、``第2个``）优先：它对应商店图/菜单里的那个编号，
+    所以用户手边只有一张旧图也能照发。编号指向的商品即使已下架也会返回，
+    交给调用方给出"已下架"这种更准确的原因；名称搜索则只在上架商品里找。
 
     Args:
         data: 数据字典。
-        name: 用户输入的商品名（可带空格）。
+        name: 用户输入的编号或商品名（可带空格）。
 
     Returns:
         ``(候选列表, 错误说明)``。错误说明非空时表示请求本身不合法。
     """
+    settings = data.get("settings")
     keyword = (name or "").strip()
     if not keyword:
-        return [], f"请带上商品名，例如：{command_text('兑换商品 可乐', data.get('settings'))}"
+        return [], f"请带上编号或商品名，例如：{command_text('兑换商品', settings)}"
     products = [item for item in all_products(data) if item.enabled]
+    numbered = numbered_products(data)
+
+    wanted = _number_input(keyword)
+    if wanted is not None:
+        target = product_number(wanted)
+        hit = next((product for number, product in numbered if number == target), None)
+        if hit is not None:
+            return [hit], ""
+        # 商品名本身可能就是个数字，所以编号落空时再按名称精确比一次
+        exact_named = [
+            item for item in products if item.name.replace(" ", "") == keyword.replace(" ", "")
+        ]
+        if exact_named:
+            return exact_named, ""
+        return [], (
+            f"没有 {keyword} 号商品，发送 {command_text('兑换商品', settings)}"
+            "（不带编号）看最新列表"
+        )
+
     exact = [item for item in products if item.name == keyword]
     if exact:
         return exact, ""
@@ -477,7 +607,8 @@ def find_products(data: dict[str, Any], name: str) -> tuple[list[Product], str]:
     if partial:
         return partial, ""
     return [], (
-        f"没有找到商品「{keyword}」，发送 {command_text('商店', data.get('settings'))} 看看有哪些吧"
+        f"没有找到商品「{keyword}」，发送 {command_text('兑换商品', settings)}"
+        "（不带编号）看最新列表"
     )
 
 
@@ -617,6 +748,15 @@ def perform_checkin(
     )
     if len(history) > 400:
         del history[: len(history) - 400]
+    append_ledger(
+        data,
+        user_key,
+        LEDGER_CHECKIN,
+        gained,
+        now,
+        note=f"连签 {streak} 天" + (f"（基础 {base} + 奖励 {bonus}）" if bonus else ""),
+        ref=today,
+    )
     return CheckinOutcome(
         success=True,
         message="打卡成功",
@@ -886,6 +1026,15 @@ def perform_redemption(
         f"消耗 {product.cost} 积分，当前余额 {user['points']} 积分\n"
         "管理员会在后台标记发放状态。"
     )
+    append_ledger(
+        data,
+        pending.user_key,
+        LEDGER_REDEEM,
+        -product.cost,
+        now,
+        note=f"兑换「{product.name}」",
+        ref=record_id,
+    )
     return True, message, _as_int(user["points"]), record_id
 
 
@@ -922,6 +1071,202 @@ def user_history(data: dict[str, Any], user_key: str, limit: int = 7) -> list[di
     history = (data.get("users", {}).get(user_key) or {}).get("history") or []
     items = [item for item in history if isinstance(item, dict)]
     return list(reversed(items))[: max(1, int(limit))]
+
+
+# ------------------------------------------------------------------ 账单流水
+
+
+def append_ledger(
+    data: dict[str, Any],
+    user_key: str,
+    kind: str,
+    points: int,
+    now: float,
+    note: str = "",
+    ref: str = "",
+) -> dict[str, Any]:
+    """追加一条积分流水（**必须在用户余额已经改完之后调用**）。
+
+    Args:
+        data: 数据字典（会被就地修改）。
+        user_key: 用户主键。
+        kind: 变动类型，取值见 :data:`LEDGER_TYPES`。
+        points: 有符号变动量（收入为正、支出为负）。
+        now: 当前时间戳。
+        note: 备注（例如"管理员调整：活动奖励"）。
+        ref: 关联单号（兑换记录 id、打卡日期等）。
+
+    Returns:
+        写入的流水条目。
+    """
+    user = data.get("users", {}).get(user_key) or {}
+    entry = {
+        "id": "l_" + uuid.uuid4().hex[:10],
+        "user_key": user_key,
+        "user_id": str(user.get("user_id") or ""),
+        "nickname": str(user.get("nickname") or ""),
+        "type": str(kind or LEDGER_ADJUST),
+        "points": _as_int(points),
+        "balance": _as_int(user.get("points")),
+        "note": str(note or ""),
+        "ref": str(ref or ""),
+        "created_at": now,
+    }
+    ledger = data.setdefault("ledger", [])
+    if not isinstance(ledger, list):
+        ledger = []
+        data["ledger"] = ledger
+    ledger.append(entry)
+    if len(ledger) > LEDGER_LIMIT:
+        del ledger[: len(ledger) - LEDGER_LIMIT]
+    return entry
+
+
+def _ledger_matches(entry: dict[str, Any], keyword: str, kind: str) -> bool:
+    if kind and str(entry.get("type") or "") != kind:
+        return False
+    if not keyword:
+        return True
+    haystack = " ".join(
+        [
+            str(entry.get("nickname") or ""),
+            str(entry.get("user_id") or ""),
+            str(entry.get("user_key") or ""),
+            str(entry.get("note") or ""),
+            str(entry.get("ref") or ""),
+        ]
+    ).lower()
+    return keyword.lower() in haystack
+
+
+def _ledger_bound(value: Any, *, upper: bool) -> float | None:
+    """把日期/时间戳筛选项解析成时间戳边界。
+
+    支持 ``1699999999``（秒）、``1699999999000``（毫秒）、``2026-10-11``、
+    ``2026-10-11 08:30``。上边界按"那一整天/那一分钟的最后一刻"取，保证当天的记录不会被漏掉。
+    """
+    if value in (None, "", 0, "0"):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    stamp: float | None = None
+    if re.fullmatch(r"\d{10}", text):
+        stamp = float(text)
+    elif re.fullmatch(r"\d{13}", text):
+        stamp = float(text) / 1000.0
+    else:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                parsed = time.strptime(text, fmt)
+            except ValueError:
+                continue
+            stamp = time.mktime(parsed)
+            if fmt == "%Y-%m-%d" and upper:
+                stamp += 86399
+            elif fmt == "%Y-%m-%d %H:%M" and upper:
+                stamp += 59
+            break
+    return stamp
+
+
+def filter_ledger(
+    data: dict[str, Any],
+    keyword: str = "",
+    kind: str = "",
+    start: Any = None,
+    end: Any = None,
+) -> list[dict[str, Any]]:
+    """按条件筛选流水（新的在前）。"""
+    keyword = str(keyword or "").strip()
+    kind = str(kind or "").strip()
+    if kind and kind not in LEDGER_TYPES:
+        kind = ""
+    low = _ledger_bound(start, upper=False)
+    high = _ledger_bound(end, upper=True)
+    rows: list[dict[str, Any]] = []
+    ledger = data.get("ledger")
+    if not isinstance(ledger, list):
+        return rows
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if not _ledger_matches(entry, keyword, kind):
+            continue
+        stamp = _as_float(entry.get("created_at"))
+        if low is not None and stamp < low:
+            continue
+        if high is not None and stamp > high:
+            continue
+        rows.append(entry)
+    # 时间相同的按写入顺序倒序，保证分页稳定
+    rows.sort(key=lambda item: _as_float(item.get("created_at")), reverse=True)
+    return rows
+
+
+def ledger_totals(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
+    """汇总流水的收入 / 支出 / 净额。"""
+    items = list(rows)
+    income = 0
+    expense = 0
+    for entry in items:
+        points = _as_int((entry or {}).get("points"))
+        if points >= 0:
+            income += points
+        else:
+            expense += -points
+    return {"income": income, "expense": expense, "net": income - expense, "count": len(items)}
+
+
+def list_ledger(
+    data: dict[str, Any],
+    keyword: str = "",
+    kind: str = "",
+    start: Any = None,
+    end: Any = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict[str, Any]:
+    """分页返回流水，附上**筛选后全部**条目的汇总（不是当前页的汇总）。"""
+    rows = filter_ledger(data, keyword, kind, start, end)
+    page = max(1, _as_int(page, 1))
+    page_size = min(200, max(1, _as_int(page_size, 20)))
+    begin = (page - 1) * page_size
+    totals = ledger_totals(rows)
+    return {
+        "items": [dict(item) for item in rows[begin : begin + page_size]],
+        "total": len(rows),
+        "page": page,
+        "page_size": page_size,
+        **totals,
+    }
+
+
+LEDGER_CSV_HEADER = ("时间", "用户", "平台", "用户ID", "类型", "积分变动", "变动后余额", "备注", "关联单号")
+
+
+def ledger_csv(data: dict[str, Any], keyword: str = "", kind: str = "", start: Any = None, end: Any = None) -> str:
+    """把筛选后的流水导成 CSV 文本（带 BOM，Excel 打开中文不乱码）。"""
+    rows = filter_ledger(data, keyword, kind, start, end)
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(LEDGER_CSV_HEADER)
+    for entry in rows:
+        points = _as_int(entry.get("points"))
+        writer.writerow(
+            [
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_as_float(entry.get("created_at")))),
+                str(entry.get("nickname") or ""),
+                str(entry.get("user_key") or "").split(":", 1)[0],
+                str(entry.get("user_id") or ""),
+                str(entry.get("type") or ""),
+                f"+{points}" if points > 0 else str(points),
+                str(_as_int(entry.get("balance"))),
+                str(entry.get("note") or ""),
+                str(entry.get("ref") or ""),
+            ]
+        )
+    return "\ufeff" + buffer.getvalue()
 
 
 # ---------------------------------------------------------------------- 后台操作
@@ -1095,6 +1440,14 @@ def adjust_user_points(
             "note": f"管理员调整：{note}" if note else "管理员调整",
         }
     )
+    append_ledger(
+        data,
+        user_key,
+        LEDGER_ADJUST,
+        gained,
+        now,
+        note=f"管理员调整：{note}" if note else "管理员调整",
+    )
     return True, f"积分已从 {before} 调整为 {target}", target
 
 
@@ -1191,6 +1544,15 @@ def transition_redemption(
                 product["stock"] = _as_int(product.get("stock")) + 1
             product["redeemed"] = max(0, _as_int(product.get("redeemed")) - 1)
         record["note"] = (note or "已取消并返还积分") + "（积分已返还）"
+        append_ledger(
+            data,
+            str(record.get("user_key") or ""),
+            LEDGER_REFUND,
+            cost,
+            now,
+            note=f"取消兑换「{record.get('product_name') or ''}」返还",
+            ref=record_id,
+        )
     # 只有"从非已发放变为已发放"才通知，重复点击不会重复打扰用户
     notify = dict(record) if status == "已发放" and previous != "已发放" else None
     return True, f"记录状态已更新为 {status}", notify
@@ -1344,26 +1706,34 @@ __all__ = [
     "Store",
     "adjust_user_points",
     "all_products",
+    "append_ledger",
     "bare_command_hint",
     "bind_user_email",
     "build_help_view",
     "build_pending",
     "build_shop_view",
     "calculate_checkin_points",
+    "catalog_text",
     "decide_confirmation",
     "delete_product",
     "delete_redemption",
+    "filter_ledger",
     "find_products",
     "help_text",
     "leaderboard",
+    "ledger_csv",
+    "ledger_totals",
+    "list_ledger",
     "list_redemptions",
     "list_users",
     "match_confirm_reply",
+    "numbered_products",
     "normalize_product",
     "parse_decision",
     "perform_checkin",
     "perform_redemption",
     "pick_pending",
+    "product_number",
     "product_state",
     "prompt_text",
     "public_settings",

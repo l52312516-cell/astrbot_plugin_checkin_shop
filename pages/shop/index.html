@@ -34,6 +34,7 @@
       <button class="tab" data-tab="rewards" role="tab" type="button">打卡规则</button>
       <button class="tab" data-tab="users" role="tab" type="button">用户积分</button>
       <button class="tab" data-tab="redemptions" role="tab" type="button">兑换记录</button>
+      <button class="tab" data-tab="ledger" role="tab" type="button">账单流水</button>
       <button class="tab" data-tab="settings" role="tab" type="button">展示设置</button>
     </nav>
 
@@ -121,19 +122,37 @@
               <button id="new-product" class="btn btn-primary" type="button">新增商品</button>
             </div>
           </div>
-          <p id="preview-hint" class="muted">商品会按这里的顺序出现在商店图里；点「预览商店图」可导出预览图，下架的商品不出图，但历史兑换记录不受影响。</p>
+          <p id="preview-hint" class="muted">商品会按这里的顺序出现在商店图与用户看到的编号里（序号 01、02…）；点「预览商店图」可导出预览图，下架的商品不出图，但历史兑换记录不受影响。</p>
+
+          <div class="filters">
+            <input id="product-search" type="search" placeholder="搜索名称 / 分类 / 价格" />
+            <select id="product-category">
+              <option value="">全部分类</option>
+            </select>
+            <select id="product-status">
+              <option value="">全部状态</option>
+              <option value="enabled">已上架</option>
+              <option value="disabled">已下架</option>
+              <option value="redeemable">可兑换</option>
+              <option value="soldout">已售完</option>
+              <option value="points">积分不足</option>
+            </select>
+            <button id="product-filter-reset" class="btn btn-secondary" type="button">清空筛选</button>
+            <span id="product-count" class="muted"></span>
+          </div>
 
           <div class="table-wrap">
             <table class="table" id="product-table">
               <thead>
                 <tr>
+                  <th class="num">序号</th>
                   <th>图片</th>
-                  <th>名称</th>
-                  <th class="num">价格</th>
-                  <th class="num">库存</th>
-                  <th class="num">限购</th>
-                  <th>分类</th>
-                  <th>状态</th>
+                  <th class="sortable" data-sort="name" aria-sort="none"><button type="button" class="th-sort">名称</button></th>
+                  <th class="num sortable" data-sort="cost" aria-sort="none"><button type="button" class="th-sort">价格</button></th>
+                  <th class="num sortable" data-sort="stock" aria-sort="none"><button type="button" class="th-sort">库存</button></th>
+                  <th class="num sortable" data-sort="limit" aria-sort="none"><button type="button" class="th-sort">限购</button></th>
+                  <th class="sortable" data-sort="category" aria-sort="none"><button type="button" class="th-sort">分类</button></th>
+                  <th class="sortable" data-sort="status" aria-sort="none"><button type="button" class="th-sort">状态</button></th>
                   <th class="actions">操作</th>
                 </tr>
               </thead>
@@ -147,8 +166,8 @@
               <path d="M3 7.5h18" />
               <path d="M8.5 7.5V5.6A2.1 2.1 0 0 1 10.6 3.5h2.8a2.1 2.1 0 0 1 2.1 2.1v1.9" />
             </svg>
-            <p class="empty-title">还没有商品</p>
-            <p class="empty-hint">点右上角「新增商品」添加第一个商品，保存后商店图会立刻用上它。</p>
+            <p class="empty-title" id="product-empty-title">还没有商品</p>
+            <p class="empty-hint" id="product-empty-hint">点右上角「新增商品」添加第一个商品，保存后商店图会立刻用上它。</p>
           </div>
         </div>
       </section>
@@ -256,6 +275,68 @@
         </div>
       </section>
 
+      <section class="panel" data-panel="ledger">
+        <div class="card">
+          <div class="card-head">
+            <h2>账单流水</h2>
+            <div class="row-end">
+              <button id="ledger-export" class="btn btn-secondary" type="button">导出 CSV</button>
+            </div>
+          </div>
+          <p class="muted">
+            每一次积分变动都会记一条：打卡赚分、兑换扣分、取消兑换返还、管理员手动调整。
+            表格里的是「变动后余额」，方便按顺序对账；点「导出 CSV」会把<strong>当前筛选条件</strong>下的全部记录导出（带 BOM，Excel 直接打开不乱码）。
+          </p>
+          <div class="filters">
+            <input id="ledger-keyword" type="search" placeholder="搜索昵称 / QQ / 备注" />
+            <select id="ledger-type">
+              <option value="">全部类型</option>
+              <option value="打卡">打卡</option>
+              <option value="兑换">兑换</option>
+              <option value="返还">返还</option>
+              <option value="调整">调整</option>
+            </select>
+            <input id="ledger-start" type="date" title="起始日期" />
+            <input id="ledger-end" type="date" title="结束日期" />
+            <button id="ledger-search" class="btn btn-secondary" type="button">筛选</button>
+            <span id="ledger-summary" class="muted"></span>
+          </div>
+
+          <div class="table-wrap">
+            <table class="table" id="ledger-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>用户</th>
+                  <th>类型</th>
+                  <th class="num">变动</th>
+                  <th class="num">变动后余额</th>
+                  <th>备注</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="empty-state" id="ledger-empty" hidden>
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4.5 5.5h15v13h-15z" />
+              <path d="M8 9.5h8" />
+              <path d="M8 12.5h8" />
+              <path d="M8 15.5h4" />
+            </svg>
+            <p class="empty-title" id="ledger-empty-title">还没有流水</p>
+            <p class="empty-hint" id="ledger-empty-hint">有人打卡或用积分兑换之后，这里就有记录了；清空筛选条件可以看全部。</p>
+          </div>
+
+          <div class="pager">
+            <button id="ledger-prev" class="btn btn-secondary" type="button">上一页</button>
+            <span id="ledger-page" class="muted"></span>
+            <button id="ledger-next" class="btn btn-secondary" type="button">下一页</button>
+          </div>
+        </div>
+      </section>
+
       <section class="panel" data-panel="settings">
         <div class="card">
           <h2>展示与行为设置</h2>
@@ -345,8 +426,9 @@
           </label>
           <label>
             <span class="field-label">分类</span>
-            <input id="p-category" type="text" maxlength="20" placeholder="默认" />
-            <span class="field-hint">留空按「默认」处理。</span>
+            <input id="p-category" type="text" maxlength="20" placeholder="默认" list="category-options" />
+            <datalist id="category-options"></datalist>
+            <span class="field-hint">可以从已有分类里选，也可以直接输一个新分类。</span>
           </label>
           <label class="wide">
             <span class="field-label">描述</span>

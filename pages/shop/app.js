@@ -5,13 +5,22 @@ const bridge = window.AstrBotPluginPage;
 const state = {
   summary: null,
   productRows: [],
+  productKeyword: '',
+  productCategory: '',
+  productStatus: '',
+  productSort: '',
+  productSortAsc: false,
   userRows: [],
   redeemRows: [],
+  ledgerRows: [],
   userPage: 1,
   redeemPage: 1,
+  ledgerPage: 1,
   userTotal: 0,
   redeemTotal: 0,
+  ledgerTotal: 0,
   editingImagePath: '',
+  editingSortOrder: null,
   pendingImage: null,
   previewProductId: '',
   adjustUserKey: '',
@@ -235,6 +244,8 @@ async function loadSummary() {
   fillRewardForm(summary.rewards);
   fillSettingsForm(summary.settings || {});
   state.productRows = summary.products || [];
+  fillCategoryOptions();
+  syncProductSortHeader();
   renderProducts();
   renderStats();
 }
@@ -361,7 +372,8 @@ async function saveSettings() {
 
 function renderProducts() {
   const tbody = $('product-table').querySelector('tbody');
-  const empty = state.productRows.length === 0;
+  const rows = productView();
+  const empty = rows.length === 0;
   tbody.innerHTML = '';
   const wrap = $('product-table').closest('.table-wrap');
   if (wrap) {
@@ -371,7 +383,27 @@ function renderProducts() {
     wrap.scrollLeft = 0;
   }
   $('product-empty').hidden = !empty;
-  state.productRows.forEach((product) => {
+  if (state.productRows.length === 0) {
+    $('product-empty-title').textContent = '还没有商品';
+    $('product-empty-hint').textContent =
+      '点右上角「新增商品」添加第一个商品，保存后商店图会立刻用上它。';
+  } else {
+    $('product-empty-title').textContent = '没有匹配的商品';
+    $('product-empty-hint').textContent = '换个关键词或点「清空筛选」看全部商品。';
+  }
+  const count = $('product-count');
+  if (count) {
+    count.textContent = `共 ${state.productRows.length} 个 · 显示 ${rows.length} 个`;
+  }
+  // 序号以接口返回的 number 为准（服务端按全量商品算，和用户看到的编号一致）；
+  // 万一旧数据没带 number，就按全量列表位置补一个等价的编号。
+  const numbers = new Map(
+    state.productRows.map((item, index) => [
+      item.id,
+      item.number || String(index + 1).padStart(2, '0'),
+    ]),
+  );
+  rows.forEach((product) => {
     const row = document.createElement('tr');
     const stock = product.stock === null || product.stock === undefined ? '不限量' : product.stock;
     const limit =
@@ -379,24 +411,35 @@ function renderProducts() {
         ? '不限购'
         : product.per_user_limit;
     row.innerHTML = `
+      <td class="num cell-number"></td>
       <td class="thumb-cell"></td>
       <td class="cell-name"></td>
       <td class="num"></td>
       <td class="num"></td>
       <td class="num"></td>
       <td></td>
-      <td><span class="tag ${product.enabled ? 'ok' : 'warn'}">${product.enabled ? '上架' : '下架'}</span></td>
+      <td></td>
       <td class="cell-actions"><div class="row-actions">
+        <button class="btn-link" type="button" data-action="up" title="上移">↑</button>
+        <button class="btn-link" type="button" data-action="down" title="下移">↓</button>
         <button class="btn-link" type="button" data-action="edit">编辑</button>
         <button class="btn-link is-quiet" type="button" data-action="delete">删除</button>
       </div></td>`;
     const cells = row.querySelectorAll('td');
-    setClipText(cells[1], product.name);
-    cells[2].textContent = `${product.cost} 积分`;
-    cells[3].textContent = String(stock);
-    cells[4].textContent = String(limit);
-    cells[5].textContent = product.category || '默认';
-    const thumbCell = cells[0];
+    cells[0].textContent = numbers.get(product.id) || '';
+    setClipText(cells[2], product.name);
+    cells[3].textContent = `${product.cost} 积分`;
+    cells[4].textContent = String(stock);
+    cells[5].textContent = String(limit);
+    cells[6].textContent = product.category || '默认';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = `tag tag-button ${product.enabled ? 'ok' : 'warn'}`;
+    toggle.dataset.action = 'toggle';
+    toggle.title = product.enabled ? '点一下下架' : '点一上架';
+    toggle.textContent = product.enabled ? '上架' : '下架';
+    cells[7].appendChild(toggle);
+    const thumbCell = cells[1];
     if (product.image_path) {
       const img = document.createElement('img');
       img.className = 'thumb';
@@ -418,8 +461,184 @@ function renderProducts() {
       // 注意：确认框等待期间不要显示 spinner，只有真正发请求时才算"进行中"
       deleteProduct(product, event.currentTarget).catch((error) => say(errorText(error), 'error'));
     });
+    toggle.addEventListener('click', (event) => {
+      toggleProduct(product, event.currentTarget).catch((error) => say(errorText(error), 'error'));
+    });
+    row.querySelector('[data-action="up"]').addEventListener('click', (event) => {
+      moveProduct(product, -1, event.currentTarget).catch((error) =>
+        say(errorText(error), 'error'),
+      );
+    });
+    row.querySelector('[data-action="down"]').addEventListener('click', (event) => {
+      moveProduct(product, 1, event.currentTarget).catch((error) =>
+        say(errorText(error), 'error'),
+      );
+    });
     tbody.appendChild(row);
   });
+}
+
+// 商品表当前该显示哪些行：先筛选，再按表头排序（默认保持展示顺序 = 序号顺序）
+function productView() {
+  const keyword = state.productKeyword.trim().toLowerCase();
+  const compact = keyword.replace(/\s+/g, '');
+  const rows = state.productRows.filter((product) => {
+    if (state.productCategory && (product.category || '默认') !== state.productCategory) {
+      return false;
+    }
+    if (!matchProductStatus(product, state.productStatus)) return false;
+    if (!compact) return true;
+    const haystack = [product.name, product.category, product.description, product.number, `${product.cost}`]
+      .map((value) => String(value === null || value === undefined ? '' : value).toLowerCase())
+      .join(' ');
+    return haystack.replace(/\s+/g, '').includes(compact);
+  });
+  if (!state.productSort) return rows;
+  const field = state.productSort;
+  const factor = state.productSortAsc ? 1 : -1;
+  const value = (product) => {
+    if (field === 'cost') return Number(product.cost) || 0;
+    if (field === 'stock') return product.stock === null || product.stock === undefined ? -1 : Number(product.stock);
+    if (field === 'limit') {
+      return product.per_user_limit === null || product.per_user_limit === undefined
+        ? -1
+        : Number(product.per_user_limit);
+    }
+    if (field === 'status') return product.enabled ? 1 : 0;
+    return String(product[field] || '');
+  };
+  return rows
+    .map((product, index) => ({ product, index }))
+    .sort((left, right) => {
+      const a = value(left.product);
+      const b = value(right.product);
+      if (a === b) return left.index - right.index; // 同值时保持展示顺序，序号列才稳定
+      if (typeof a === 'string' || typeof b === 'string') {
+        return String(a).localeCompare(String(b), 'zh-Hans-CN') * factor;
+      }
+      return (a < b ? -1 : 1) * factor;
+    })
+    .map((item) => item.product);
+}
+
+// 状态筛选：上架/下架是商品自身状态，其余三种按"对某个用户能不能换"的规则判断，
+// 后台没有具体用户，所以只按规则本身（库存、限购、价格）判断。
+function matchProductStatus(product, status) {
+  if (!status) return true;
+  const stock = product.stock === null || product.stock === undefined ? null : Number(product.stock);
+  if (status === 'enabled') return product.enabled !== false;
+  if (status === 'disabled') return product.enabled === false;
+  if (status === 'soldout') return stock !== null && stock <= 0;
+  if (status === 'points') return Number(product.cost) > 0;
+  if (status === 'redeemable') {
+    return product.enabled !== false && (stock === null || stock > 0);
+  }
+  return true;
+}
+
+// 分类下拉的选项：从现有商品里自动收集（按展示顺序首次出现的顺序），不新增数据字段
+function fillCategoryOptions() {
+  const select = $('product-category');
+  const list = $('category-options');
+  if (!select) return;
+  const seen = [];
+  state.productRows.forEach((product) => {
+    const value = product.category || '默认';
+    if (!seen.includes(value)) seen.push(value);
+  });
+  const current = state.productCategory;
+  select.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = '全部分类';
+  select.appendChild(all);
+  seen.forEach((value) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  });
+  select.value = seen.includes(current) ? current : '';
+  state.productCategory = select.value;
+  if (list) {
+    list.innerHTML = '';
+    seen.forEach((value) => {
+      const option = document.createElement('option');
+      option.value = value;
+      list.appendChild(option);
+    });
+  }
+}
+
+function resetProductFilters() {
+  state.productKeyword = '';
+  state.productCategory = '';
+  state.productStatus = '';
+  state.productSort = '';
+  state.productSortAsc = false;
+  if ($('product-search')) $('product-search').value = '';
+  if ($('product-category')) $('product-category').value = '';
+  if ($('product-status')) $('product-status').value = '';
+  syncProductSortHeader();
+  renderProducts();
+}
+
+function syncProductSortHeader() {
+  document.querySelectorAll('#product-table th.sortable').forEach((th) => {
+    const active = th.dataset.sort === state.productSort;
+    th.setAttribute('aria-sort', active ? (state.productSortAsc ? 'ascending' : 'descending') : 'none');
+    th.classList.toggle('is-sorted', active);
+  });
+}
+
+// 行内快速上下架：复用保存接口，提交完整商品对象（后端只认白名单字段）
+async function toggleProduct(product, trigger) {
+  const next = !(product.enabled !== false);
+  try {
+    const result = await withBusy(
+      trigger,
+      () =>
+        post('shop/products/save', {
+          id: product.id,
+          name: product.name,
+          cost: product.cost,
+          stock: product.stock,
+          per_user_limit: product.per_user_limit,
+          category: product.category || '默认',
+          description: product.description || '',
+          enabled: next,
+          sort_order: product.sort_order,
+        }),
+      '切换中',
+    );
+    await loadSummary();
+    say(`「${product.name}」已${next ? '上架' : '下架'}`, 'ok');
+    return result;
+  } catch (error) {
+    say(`切换失败：${errorText(error)}`, 'error');
+    throw error;
+  }
+}
+
+// 上移/下移：序号就是展示顺序，所以这里改的是"谁能被编号选中"
+async function moveProduct(product, offset, trigger) {
+  const order = state.productRows.map((item) => item.id);
+  const index = order.indexOf(product.id);
+  const target = index + offset;
+  if (index < 0 || target < 0 || target >= order.length) return;
+  order.splice(target, 0, order.splice(index, 1)[0]);
+  try {
+    await withBusy(
+      trigger,
+      () => post('shop/products/reorder', { order }),
+      '调整中',
+    );
+    await loadSummary();
+    say(`「${product.name}」序号已更新`, 'ok');
+  } catch (error) {
+    say(`调整失败：${errorText(error)}`, 'error');
+    throw error;
+  }
 }
 
 async function loadImage(relativePath) {
@@ -454,6 +673,8 @@ function openProduct(product) {
   clearErrors(['p-name', 'p-cost', 'p-stock', 'p-limit']);
   state.editingImagePath = product ? product.image_path || '' : '';
   state.previewProductId = editing ? product.id : '';
+  // 编辑时保留原有 sort_order，否则"保存一下就跳到列表最后"（序号会跟着变）
+  state.editingSortOrder = editing ? Number(product.sort_order) || 0 : null;
   state.pendingImage = null;
   renderProductPreview();
   $('product-modal').hidden = false;
@@ -505,7 +726,11 @@ async function saveProduct() {
     category: $('p-category').value.trim() || '默认',
     description: $('p-desc').value.trim(),
     enabled: $('p-enabled').checked,
-    sort_order: state.productRows.length * 10 + 10,
+    // 编辑时保持原来的位置；新增的排到最后
+    sort_order:
+      state.editingSortOrder === null
+        ? state.productRows.length * 10 + 10
+        : state.editingSortOrder,
   };
   const saved = await post('shop/products/save', payload);
   const productId = (saved.product && saved.product.id) || state.previewProductId;
@@ -785,6 +1010,101 @@ async function deleteRedemption(record, trigger) {
   }
 }
 
+// ---------------------------------------------------------------- 账单流水
+
+const LEDGER_TAG = { 打卡: 'ok', 兑换: 'warn', 返还: 'danger', 调整: '' };
+
+function ledgerFilters() {
+  return {
+    keyword: $('ledger-keyword').value.trim(),
+    type: $('ledger-type').value,
+    start: $('ledger-start').value,
+    end: $('ledger-end').value,
+  };
+}
+
+function syncLedgerPager() {
+  $('ledger-prev').disabled = state.ledgerPage <= 1;
+  $('ledger-next').disabled = state.ledgerPage * PAGE_SIZE >= state.ledgerTotal;
+  $('ledger-page').textContent = `第 ${state.ledgerPage} 页 · 共 ${state.ledgerTotal} 条`;
+}
+
+function renderLedgerSummary(result) {
+  const income = Number(result.income) || 0;
+  const expense = Number(result.expense) || 0;
+  const net = Number(result.net) || 0;
+  const netText = net >= 0 ? `+${net}` : String(net);
+  $('ledger-summary').textContent =
+    `筛选结果：收入 ${income} · 支出 ${expense} · 净变动 ${netText}`;
+}
+
+async function loadLedger(page) {
+  if (page) state.ledgerPage = page;
+  const result = await post('shop/ledger', {
+    ...ledgerFilters(),
+    page: state.ledgerPage,
+    page_size: PAGE_SIZE,
+  });
+  state.ledgerRows = result.items || [];
+  state.ledgerTotal = result.total || 0;
+  renderLedgerSummary(result);
+  const tbody = $('ledger-table').querySelector('tbody');
+  tbody.innerHTML = '';
+  state.ledgerRows.forEach((entry) => {
+    const row = document.createElement('tr');
+    row.innerHTML =
+      '<td></td><td class="cell-name"></td><td></td><td class="num"></td>' +
+      '<td class="num"></td><td class="cell-name"></td>';
+    const cells = row.querySelectorAll('td');
+    const stamp = new Date(Number(entry.created_at) * 1000);
+    cells[0].textContent = Number.isNaN(stamp.getTime())
+      ? '-'
+      : stamp.toLocaleString('zh-CN', { hour12: false });
+    setClipText(cells[1], entry.nickname || entry.user_id || entry.user_key);
+    const tag = document.createElement('span');
+    const tone = LEDGER_TAG[entry.type] || '';
+    tag.className = `tag${tone ? ` ${tone}` : ''}`;
+    tag.textContent = entry.type || '-';
+    cells[2].appendChild(tag);
+    const points = Number(entry.points) || 0;
+    cells[3].textContent = points > 0 ? `+${points}` : String(points);
+    cells[3].className = `num ${points >= 0 ? 'delta-in' : 'delta-out'}`;
+    cells[4].textContent = String(entry.balance ?? '-');
+    setClipText(cells[5], entry.note || '-');
+    tbody.appendChild(row);
+  });
+  const empty = state.ledgerRows.length === 0;
+  const wrap = $('ledger-table').closest('.table-wrap');
+  if (wrap) {
+    wrap.hidden = empty;
+    wrap.scrollTop = 0;
+    wrap.scrollLeft = 0;
+  }
+  $('ledger-empty').hidden = !empty;
+  const filtered = Boolean(
+    ($('ledger-keyword').value || '').trim() ||
+      $('ledger-type').value ||
+      $('ledger-start').value ||
+      $('ledger-end').value,
+  );
+  $('ledger-empty-title').textContent = filtered ? '没有匹配的流水' : '还没有流水';
+  $('ledger-empty-hint').textContent = filtered
+    ? '换个关键词/类型/时间区间，或点「筛选」前先清空条件。'
+    : '有人打卡或用积分兑换之后，这里就有记录了；只有从本版本起发生的变动才会被记录，历史兑换请看「兑换记录」页。';
+  syncLedgerPager();
+}
+
+async function exportLedger() {
+  const filters = ledgerFilters();
+  try {
+    // busy 态由外面的 run() 负责，这里不要再套一层 withBusy
+    await bridge.download('shop/ledger/export', filters, 'checkin-ledger.csv');
+    say('导出已开始：CSV 按当前筛选条件导出，浏览器下载栏可见。', 'ok');
+  } catch (error) {
+    say(`导出失败：${errorText(error)}`, 'error');
+  }
+}
+
 // ---------------------------------------------------------------- 初始化
 
 function bindTabs() {
@@ -797,6 +1117,7 @@ function bindTabs() {
       if (panel) panel.classList.add('active');
       if (tab.dataset.tab === 'users') run(null, () => loadUsers(1));
       if (tab.dataset.tab === 'redemptions') run(null, () => loadRedemptions(1));
+      if (tab.dataset.tab === 'ledger') run(null, () => loadLedger(1));
     });
   });
 }
@@ -828,6 +1149,33 @@ async function boot() {
   $('reward-mode').addEventListener('change', syncRewardMode);
   $('set-prefix').addEventListener('input', updatePrefixHint);
   $('new-product').addEventListener('click', () => openProduct(null));
+  // 筛选/排序都在前端完成：商品本来就是一次性加载的，这样点一下就有反馈、不再多打一次接口
+  $('product-search').addEventListener('input', () => {
+    state.productKeyword = $('product-search').value;
+    renderProducts();
+  });
+  $('product-category').addEventListener('change', () => {
+    state.productCategory = $('product-category').value;
+    renderProducts();
+  });
+  $('product-status').addEventListener('change', () => {
+    state.productStatus = $('product-status').value;
+    renderProducts();
+  });
+  $('product-filter-reset').addEventListener('click', resetProductFilters);
+  document.querySelectorAll('#product-table th.sortable').forEach((th) => {
+    th.addEventListener('click', () => {
+      const field = th.dataset.sort;
+      if (state.productSort === field) {
+        state.productSortAsc = !state.productSortAsc;
+      } else {
+        state.productSort = field;
+        state.productSortAsc = true;
+      }
+      syncProductSortHeader();
+      renderProducts();
+    });
+  });
   $('p-save').addEventListener('click', (event) => {
     run(event.currentTarget, saveProduct, '保存中');
   });
@@ -873,6 +1221,20 @@ async function boot() {
     if (state.redeemPage * PAGE_SIZE >= state.redeemTotal) return;
     run(event.currentTarget, () => loadRedemptions(state.redeemPage + 1)).finally(syncRedeemPager);
   });
+  $('ledger-search').addEventListener('click', (event) => {
+    run(event.currentTarget, () => loadLedger(1), '筛选中');
+  });
+  $('ledger-export').addEventListener('click', (event) => {
+    run(event.currentTarget, exportLedger, '导出中');
+  });
+  $('ledger-prev').addEventListener('click', (event) => {
+    if (state.ledgerPage <= 1) return;
+    run(event.currentTarget, () => loadLedger(state.ledgerPage - 1)).finally(syncLedgerPager);
+  });
+  $('ledger-next').addEventListener('click', (event) => {
+    if (state.ledgerPage * PAGE_SIZE >= state.ledgerTotal) return;
+    run(event.currentTarget, () => loadLedger(state.ledgerPage + 1)).finally(syncLedgerPager);
+  });
   bridge.onContext((next) => {
     if (next && next.isDark !== undefined) applyTheme(next.isDark);
   });
@@ -882,7 +1244,20 @@ async function boot() {
     say(errorText(error), 'error');
   }
   // 供页面 smoke 测试使用
-  window.__shopPage = { state, loadSummary, renderProducts, saveRewards, saveProduct, loadUsers, loadRedemptions };
+  window.__shopPage = {
+    state,
+    loadSummary,
+    renderProducts,
+    productView,
+    resetProductFilters,
+    fillCategoryOptions,
+    saveRewards,
+    saveProduct,
+    loadUsers,
+    loadRedemptions,
+    loadLedger,
+    exportLedger,
+  };
 }
 
 if (bridge) {

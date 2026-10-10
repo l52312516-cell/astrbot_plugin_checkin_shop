@@ -59,6 +59,8 @@ def default_data() -> dict[str, Any]:
         "users": {},
         "products": [],
         "redemptions": [],
+        # 账单流水：每一次积分变动都追加一条（打卡/兑换/取消返还/手动调整）
+        "ledger": [],
         # 上一次把插件配置页同步进运行数据时的配置值（见 main.py 的 _effective）
         "config_snapshot": {},
     }
@@ -102,6 +104,8 @@ def migrate(data: Any) -> dict[str, Any]:
     result["redemptions"] = (
         [dict(item) for item in redemptions if isinstance(item, dict)] if isinstance(redemptions, list) else []
     )
+    ledger = data.get("ledger")
+    result["ledger"] = [dict(item) for item in ledger if isinstance(item, dict)] if isinstance(ledger, list) else []
     snapshot = data.get("config_snapshot")
     result["config_snapshot"] = dict(snapshot) if isinstance(snapshot, dict) else {}
     for user in result["users"].values():

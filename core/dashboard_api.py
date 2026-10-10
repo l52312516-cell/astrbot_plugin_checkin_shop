@@ -85,7 +85,11 @@ async def shop_summary(plugin) -> Any:
             "settings": settings,
             "rewards": rewards,
             "statistics": business.shop_statistics(data),
-            "products": [item.to_dict() for item in business.all_products(data)],
+            # number 是"用户会看到的编号"（含下架商品的连续编号），后台商品表的序号列直接用它
+            "products": [
+                {**product.to_dict(), "number": number}
+                for number, product in business.numbered_products(data)
+            ],
         }
     )
 
@@ -481,6 +485,55 @@ async def redemptions_delete(plugin) -> Any:
     return json_response({"message": message})
 
 
+# ------------------------------------------------------------------ 账单流水
+
+
+def _ledger_filters(payload: dict[str, Any]) -> dict[str, Any]:
+    """页面/接口共用的流水筛选参数。"""
+    kind = str(payload.get("type") or "").strip()
+    return {
+        "keyword": str(payload.get("keyword") or "").strip(),
+        "kind": kind if kind in business.LEDGER_TYPES else "",
+        "start": payload.get("start"),
+        "end": payload.get("end"),
+    }
+
+
+async def ledger_list(plugin) -> Any:
+    """账单流水（分页 + 关键词 / 类型 / 时间筛选），附带筛选后的收支汇总。"""
+    payload = await request.json(default={})
+    payload = payload if isinstance(payload, dict) else {}
+    page, page_size = _page_args(payload)
+    data = await plugin.store.data(plugin._seed())
+    result = business.list_ledger(data, page=page, page_size=page_size, **_ledger_filters(payload))
+    # 流水条数够多时提醒管理员：超出上限的旧记录会被裁掉
+    result["limit"] = business.LEDGER_LIMIT
+    result["stored"] = len(data.get("ledger") or [])
+    result["types"] = list(business.LEDGER_TYPES)
+    return json_response(result)
+
+
+async def ledger_export(plugin) -> Any:
+    """导出流水 CSV（页面的 ``bridge.download`` 会以 GET 请求下载）。
+
+    筛选条件走 query，和列表页保持一致；导出的是**筛选后的全部**记录，不只是当前页。
+    返回的是 CSV 文本：这样既能让页面直接下载，测试里也能拿到可断言的字符串。
+    """
+    query: dict[str, Any] = {}
+    if request is not None:
+        raw = getattr(request, "query", None)
+        if raw is not None:
+            query = {key: raw.get(key) for key in ("keyword", "type", "start", "end")}
+    data = await plugin.store.data(plugin._seed())
+    return business.ledger_csv(
+        data,
+        keyword=str(query.get("keyword") or "").strip(),
+        kind=str(query.get("type") or "").strip(),
+        start=query.get("start"),
+        end=query.get("end"),
+    )
+
+
 async def preview_card(plugin) -> Any:
     """在后台预览商店卡片（``bridge.download`` 会以 GET 请求下载）。"""
     user_key = "preview:0"
@@ -520,6 +573,8 @@ class DashboardAPI:
             (f"/{PLUGIN_ID}/shop/products/image/upload", products_image_upload, ["POST"], "打卡商店：上传商品图片"),
             (f"/{PLUGIN_ID}/shop/users", users_list, ["POST"], "打卡商店：用户积分列表"),
             (f"/{PLUGIN_ID}/shop/users/adjust", users_adjust, ["POST"], "打卡商店：调整用户积分"),
+            (f"/{PLUGIN_ID}/shop/ledger", ledger_list, ["POST"], "打卡商店：账单流水"),
+            (f"/{PLUGIN_ID}/shop/ledger/export", ledger_export, ["GET"], "打卡商店：导出流水 CSV"),
             (f"/{PLUGIN_ID}/shop/redemptions", redemptions_list, ["POST"], "打卡商店：兑换记录"),
             (f"/{PLUGIN_ID}/shop/redemptions/status", redemptions_status, ["POST"], "打卡商店：更新兑换状态"),
             (f"/{PLUGIN_ID}/shop/redemptions/delete", redemptions_delete, ["POST"], "打卡商店：删除兑换记录"),

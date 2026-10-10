@@ -812,25 +812,33 @@ class CheckinShopPlugin(Star):
 
     @filter.command("兑换商品", alias={"兑换"})
     async def cmd_redeem(self, event: AstrMessageEvent, 商品名: GreedyStr = ""):
-        """兑换商品：校验后给出确认提示，等待用户引用回复 是/否。
+        """兑换商品：不带参数列编号菜单，带编号（或商品名）给出确认提示。
 
-        用法：``兑换商品 可乐``、``兑换商品 冰镇 可乐``、``兑换 可乐``
+        用法：``兑换商品``（列出编号）、``兑换 2``（按编号兑换）、
+        ``兑换商品 冰镇 可乐``（按名称，仍支持）。
         （文档里的指令前缀以插件配置页的「显示用的指令前缀」为准）。
         """
         keyword = str(商品名 or "").strip()
         user_key = self._user_key(event)
         session = self._session_key(event)
         data = await self.store.data(self._seed())
+        if not keyword:
+            # 不带编号就是"给我看菜单"：发编号即可兑换，比打字输入商品名省事
+            yield event.plain_result(business.catalog_text(data, user_key, self._display_prefix()))
+            return
         candidates, error = business.find_products(data, keyword)
         if error:
             yield event.plain_result(error)
             return
         if len(candidates) > 1:
-            names = "、".join(item.name for item in candidates[:8])
             prefix = business.display_prefix(data.get("settings"))
+            numbered = {product.id: number for number, product in business.numbered_products(data)}
+            names = "、".join(
+                f"{numbered.get(item.id, '')} {item.name}".strip() for item in candidates[:8]
+            )
             yield event.plain_result(
                 f"匹配到多个商品：{names}\n"
-                f"请把名称写得更完整，例如 {prefix}兑换商品 {candidates[0].name}"
+                f"发编号更省事，例如 {prefix}兑换 {numbered.get(candidates[0].id, '1')}"
             )
             return
         product = candidates[0]
