@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>打卡积分商店</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">积</span>
+        <div>
+          <h1 id="page-title">打卡积分商店</h1>
+          <p id="page-desc" class="muted">配置打卡积分规则、商品与兑换记录</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="status" class="status" role="status"></span>
+        <button id="refresh" class="btn ghost" type="button">刷新</button>
+      </div>
+    </header>
+
+    <section class="stats" id="stats"></section>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="products" role="tab">商品管理</button>
+      <button class="tab" data-tab="rewards" role="tab">打卡规则</button>
+      <button class="tab" data-tab="users" role="tab">用户积分</button>
+      <button class="tab" data-tab="redemptions" role="tab">兑换记录</button>
+      <button class="tab" data-tab="settings" role="tab">展示设置</button>
+    </nav>
+
+    <main>
+      <section class="panel" data-panel="rewards">
+        <div class="card">
+          <h2>打卡积分规则</h2>
+          <p class="muted">保存后立即生效；每天按重置小时判定"新的一天"。</p>
+          <div class="form-grid">
+            <label>
+              <span>积分模式</span>
+              <select id="reward-mode">
+                <option value="fixed">固定积分</option>
+                <option value="random">随机区间</option>
+                <option value="custom">自定义列表</option>
+              </select>
+            </label>
+            <label>
+              <span>固定积分</span>
+              <input id="reward-fixed" type="number" min="0" step="1" />
+            </label>
+            <label>
+              <span>随机下限</span>
+              <input id="reward-min" type="number" min="0" step="1" />
+            </label>
+            <label>
+              <span>随机上限</span>
+              <input id="reward-max" type="number" min="0" step="1" />
+            </label>
+            <label class="wide">
+              <span>自定义积分列表（英文逗号分隔）</span>
+              <input id="reward-list" type="text" placeholder="5,10,20" />
+            </label>
+            <label class="wide">
+              <span>自定义权重（可留空，等概率）</span>
+              <input id="reward-weights" type="text" placeholder="1,3,1" />
+            </label>
+            <label class="checkbox">
+              <input id="bonus-enabled" type="checkbox" />
+              <span>启用连签奖励</span>
+            </label>
+            <label>
+              <span>连签间隔（天）</span>
+              <input id="bonus-every" type="number" min="0" step="1" />
+            </label>
+            <label>
+              <span>连签奖励积分</span>
+              <input id="bonus-points" type="number" min="0" step="1" />
+            </label>
+          </div>
+          <div class="row-end">
+            <button id="save-rewards" class="btn primary" type="button">保存规则</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel active" data-panel="products">
+        <div class="card">
+          <div class="card-head">
+            <h2>商品管理</h2>
+            <div class="row-end">
+              <button id="preview-shop" class="btn ghost" type="button">预览商店图</button>
+              <button id="new-product" class="btn primary" type="button">新增商品</button>
+            </div>
+          </div>
+          <p id="preview-hint" class="muted"></p>
+          <table class="table" id="product-table">
+            <thead>
+              <tr>
+                <th>图片</th>
+                <th>名称</th>
+                <th>价格</th>
+                <th>库存</th>
+                <th>限购</th>
+                <th>分类</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p id="product-empty" class="empty">还没有商品，点「新增商品」开始吧。</p>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="users">
+        <div class="card">
+          <h2>用户积分</h2>
+          <div class="filters">
+            <input id="user-keyword" type="search" placeholder="搜索昵称 / QQ / user_key" />
+            <input id="user-platform" type="text" placeholder="平台（如 qq）" />
+            <button id="user-search" class="btn" type="button">搜索</button>
+          </div>
+          <table class="table" id="user-table">
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>平台</th>
+                <th>积分</th>
+                <th>连签</th>
+                <th>累计打卡</th>
+                <th>最后打卡</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="pager">
+            <button id="user-prev" class="btn ghost" type="button">上一页</button>
+            <span id="user-page" class="muted"></span>
+            <button id="user-next" class="btn ghost" type="button">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="redemptions">
+        <div class="card">
+          <h2>兑换记录</h2>
+          <div class="filters">
+            <select id="redeem-status">
+              <option value="">全部状态</option>
+              <option value="待发放">待发放</option>
+              <option value="已发放">已发放</option>
+              <option value="已取消">已取消</option>
+            </select>
+            <button id="redeem-search" class="btn" type="button">筛选</button>
+          </div>
+          <table class="table" id="redeem-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>用户</th>
+                <th>商品</th>
+                <th>消耗</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="pager">
+            <button id="redeem-prev" class="btn ghost" type="button">上一页</button>
+            <span id="redeem-page" class="muted"></span>
+            <button id="redeem-next" class="btn ghost" type="button">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="settings">
+        <div class="card">
+          <h2>展示与行为设置</h2>
+          <div class="form-grid">
+            <label>
+              <span>商店标题</span>
+              <input id="set-title" type="text" />
+            </label>
+            <label class="wide">
+              <span>商店副标题</span>
+              <input id="set-subtitle" type="text" />
+            </label>
+            <label>
+              <span>榜单长度</span>
+              <input id="set-board-size" type="number" min="1" max="100" step="1" />
+            </label>
+            <label>
+              <span>榜单范围</span>
+              <select id="set-board-scope">
+                <option value="platform">本平台</option>
+                <option value="global">全平台</option>
+              </select>
+            </label>
+            <label>
+              <span>确认超时（秒）</span>
+              <input id="set-timeout" type="number" min="10" max="600" step="10" />
+            </label>
+            <label>
+              <span>每日重置小时</span>
+              <input id="set-reset-hour" type="number" min="0" max="23" step="1" />
+            </label>
+            <label>
+              <span>积分作用域</span>
+              <select id="set-scope">
+                <option value="platform_user">同平台用户共享</option>
+                <option value="conversation">按会话隔离（预留）</option>
+              </select>
+            </label>
+          </div>
+          <div class="row-end">
+            <button id="save-settings" class="btn primary" type="button">保存设置</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="modal" id="product-modal" hidden>
+      <div class="modal-card">
+        <h3 id="product-modal-title">新增商品</h3>
+        <div class="form-grid">
+          <label class="wide">
+            <span>名称</span>
+            <input id="p-name" type="text" maxlength="40" />
+          </label>
+          <label>
+            <span>价格（积分）</span>
+            <input id="p-cost" type="number" min="0" step="1" />
+          </label>
+          <label>
+            <span>库存（留空 = 不限量）</span>
+            <input id="p-stock" type="number" min="0" step="1" placeholder="不限量" />
+          </label>
+          <label>
+            <span>每人限购（留空 = 不限购）</span>
+            <input id="p-limit" type="number" min="0" step="1" placeholder="不限购" />
+          </label>
+          <label>
+            <span>分类</span>
+            <input id="p-category" type="text" maxlength="20" />
+          </label>
+          <label class="wide">
+            <span>描述</span>
+            <input id="p-desc" type="text" maxlength="200" />
+          </label>
+          <label class="checkbox">
+            <input id="p-enabled" type="checkbox" />
+            <span>上架</span>
+          </label>
+          <label class="wide">
+            <span>商品图片（png/jpg/webp/gif，≤5MB）</span>
+            <input id="p-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+          </label>
+        </div>
+        <div class="modal-preview"><img id="p-preview" alt="" hidden /></div>
+        <div class="row-end">
+          <button id="p-cancel" class="btn ghost" type="button">取消</button>
+          <button id="p-save" class="btn primary" type="button">保存商品</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="adjust-modal" hidden>
+      <div class="modal-card small">
+        <h3>调整用户积分</h3>
+        <p id="adjust-user" class="muted"></p>
+        <div class="form-grid">
+          <label>
+            <span>增量（可为负）</span>
+            <input id="a-delta" type="number" step="1" value="0" />
+          </label>
+          <label>
+            <span>或直接设为</span>
+            <input id="a-absolute" type="number" min="0" step="1" placeholder="留空表示用增量" />
+          </label>
+          <label class="wide">
+            <span>备注</span>
+            <input id="a-note" type="text" maxlength="100" />
+          </label>
+        </div>
+        <div class="row-end">
+          <button id="a-cancel" class="btn ghost" type="button">取消</button>
+          <button id="a-save" class="btn primary" type="button">确认调整</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

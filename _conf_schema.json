@@ -1,0 +1,159 @@
+{
+  "checkin_mode": {
+    "description": "打卡积分模式",
+    "type": "string",
+    "options": [
+      "fixed",
+      "random",
+      "custom"
+    ],
+    "labels": [
+      "固定积分",
+      "随机区间",
+      "自定义列表"
+    ],
+    "default": "fixed",
+    "hint": "仅作为首次初始化 shop.json 的默认值；之后请在插件页「打卡规则」里修改。"
+  },
+  "checkin_fixed": {
+    "description": "固定积分（每次打卡获得）",
+    "type": "int",
+    "default": 10,
+    "slider": {
+      "min": 0,
+      "max": 1000,
+      "step": 1
+    }
+  },
+  "checkin_random_min": {
+    "description": "随机积分下限",
+    "type": "int",
+    "default": 5
+  },
+  "checkin_random_max": {
+    "description": "随机积分上限",
+    "type": "int",
+    "default": 20
+  },
+  "checkin_custom_points": {
+    "description": "自定义积分列表",
+    "type": "list",
+    "default": [
+      5,
+      10,
+      20
+    ],
+    "hint": "例如 [5, 10, 20]。"
+  },
+  "checkin_custom_weights": {
+    "description": "自定义积分权重",
+    "type": "list",
+    "default": [],
+    "hint": "留空表示等概率；填了就必须与积分列表一一对应，例如 [1, 3, 1]。"
+  },
+  "streak_bonus_enabled": {
+    "description": "启用连签奖励",
+    "type": "bool",
+    "default": true
+  },
+  "streak_bonus_every": {
+    "description": "连签奖励间隔（天）",
+    "type": "int",
+    "default": 7
+  },
+  "streak_bonus_points": {
+    "description": "连签奖励积分",
+    "type": "int",
+    "default": 50
+  },
+  "reset_hour": {
+    "description": "每日重置小时",
+    "type": "int",
+    "default": 0,
+    "slider": {
+      "min": 0,
+      "max": 23,
+      "step": 1
+    },
+    "hint": "填 4 表示凌晨 0:00~3:59 仍算前一天，适合夜间活跃的群。"
+  },
+  "leaderboard_size": {
+    "description": "积分榜长度",
+    "type": "int",
+    "default": 20,
+    "slider": {
+      "min": 1,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "leaderboard_scope": {
+    "description": "积分榜范围",
+    "type": "string",
+    "options": [
+      "platform",
+      "global"
+    ],
+    "labels": [
+      "本平台",
+      "全平台"
+    ],
+    "default": "platform"
+  },
+  "points_scope": {
+    "description": "积分作用域",
+    "type": "string",
+    "options": [
+      "platform_user",
+      "conversation"
+    ],
+    "labels": [
+      "同平台用户共享",
+      "按会话隔离"
+    ],
+    "default": "platform_user",
+    "hint": "当前版本实际按「同平台用户共享」记账；该选项预留给会话隔离模式。"
+  },
+  "confirm_timeout_seconds": {
+    "description": "兑换确认超时（秒）",
+    "type": "int",
+    "default": 60,
+    "slider": {
+      "min": 10,
+      "max": 600,
+      "step": 10
+    }
+  },
+  "shop_title": {
+    "description": "商店标题",
+    "type": "string",
+    "default": "积分商店"
+  },
+  "shop_subtitle": {
+    "description": "商店副标题",
+    "type": "string",
+    "default": "引用确认消息并回复 是/否 即可完成兑换"
+  },
+  "render_width": {
+    "description": "卡片宽度（像素）",
+    "type": "int",
+    "default": 1080,
+    "slider": {
+      "min": 640,
+      "max": 1600,
+      "step": 20
+    }
+  },
+  "render_font_size_base": {
+    "description": "卡片基础字号",
+    "type": "int",
+    "default": 0,
+    "hint": "0 表示按卡片宽度自动计算。"
+  },
+  "render_font_path": {
+    "description": "自定义字体路径",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用插件内置的 Noto Sans CJK SC；填系统字体路径可覆盖（例如 C:\\Windows\\Fonts\\msyh.ttc）。"
+  }
+}
