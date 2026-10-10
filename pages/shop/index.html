@@ -9,26 +9,32 @@
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="logo">积</span>
-        <div>
+        <span class="logo" aria-hidden="true">积</span>
+        <div class="brand-text">
           <h1 id="page-title">打卡积分商店</h1>
           <p id="page-desc" class="muted">配置打卡积分规则、商品与兑换记录</p>
         </div>
       </div>
       <div class="topbar-actions">
-        <span id="status" class="status" role="status"></span>
-        <button id="refresh" class="btn ghost" type="button">刷新</button>
+        <button id="refresh" class="btn btn-secondary" type="button">刷新</button>
       </div>
     </header>
 
-    <section class="stats" id="stats"></section>
+    <div class="statusbar">
+      <div id="status" class="status" role="status" aria-live="polite" hidden>
+        <span id="status-text" class="status-text"></span>
+        <button id="status-close" class="status-close" type="button" aria-label="关闭提示" hidden>×</button>
+      </div>
+    </div>
 
-    <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="products" role="tab">商品管理</button>
-      <button class="tab" data-tab="rewards" role="tab">打卡规则</button>
-      <button class="tab" data-tab="users" role="tab">用户积分</button>
-      <button class="tab" data-tab="redemptions" role="tab">兑换记录</button>
-      <button class="tab" data-tab="settings" role="tab">展示设置</button>
+    <section class="stats" id="stats" aria-label="概览统计"></section>
+
+    <nav class="tabs" role="tablist" aria-label="页面分区">
+      <button class="tab active" data-tab="products" role="tab" type="button">商品管理</button>
+      <button class="tab" data-tab="rewards" role="tab" type="button">打卡规则</button>
+      <button class="tab" data-tab="users" role="tab" type="button">用户积分</button>
+      <button class="tab" data-tab="redemptions" role="tab" type="button">兑换记录</button>
+      <button class="tab" data-tab="settings" role="tab" type="button">展示设置</button>
     </nav>
 
     <main>
@@ -37,50 +43,71 @@
           <h2>打卡积分规则</h2>
           <p class="muted">保存后立即生效；每天按重置小时判定"新的一天"。</p>
           <p class="muted">这里的积分模式与 AstrBot 插件配置页里的"打卡积分模式"是同一份配置：在这里保存会同步写回配置页；在配置页保存会热重载插件并覆盖这里（配置页优先）。</p>
+
+          <div class="empty-state" id="rewards-empty" hidden>
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3 2.5 20h19L12 3Z" />
+              <path d="M12 10v4" />
+              <path d="M12 17.2h.01" />
+            </svg>
+            <p class="empty-title">没有读到打卡规则配置</p>
+            <p class="empty-hint">先点右上角「刷新」重新拉取；如果一直为空，请去 AstrBot 插件配置页确认「打卡积分模式」可读，保存一次配置页即可重建默认值。</p>
+          </div>
+
           <div class="form-grid">
             <label>
-              <span>积分模式</span>
+              <span class="field-label">积分模式</span>
               <select id="reward-mode">
                 <option value="fixed">固定积分</option>
                 <option value="random">随机区间</option>
                 <option value="custom">自定义列表</option>
               </select>
+              <span class="field-hint">决定每次打卡发放多少积分，只有当前模式用到的输入框可编辑。</span>
             </label>
             <label>
-              <span>固定积分</span>
+              <span class="field-label">固定积分</span>
               <input id="reward-fixed" type="number" min="0" step="1" />
+              <span class="field-hint">每次打卡固定发放的积分。</span>
             </label>
             <label>
-              <span>随机下限</span>
+              <span class="field-label">随机下限</span>
               <input id="reward-min" type="number" min="0" step="1" />
+              <span class="field-hint">随机区间的最小值（含）。</span>
             </label>
             <label>
-              <span>随机上限</span>
+              <span class="field-label">随机上限</span>
               <input id="reward-max" type="number" min="0" step="1" />
+              <span class="field-hint">随机区间的最大值（含），需不小于下限。</span>
             </label>
             <label class="wide">
-              <span>自定义积分列表（英文逗号分隔）</span>
+              <span class="field-label">自定义积分列表（英文逗号分隔）</span>
               <input id="reward-list" type="text" placeholder="5,10,20" />
+              <span class="field-hint">例如 <code>5,10,20</code>，每次打卡从中抽一个值。</span>
+              <span class="field-error" id="reward-list-error"></span>
             </label>
             <label class="wide">
-              <span>自定义权重（可留空，等概率）</span>
+              <span class="field-label">自定义权重（可留空，等概率）</span>
               <input id="reward-weights" type="text" placeholder="1,3,1" />
+              <span class="field-hint">留空表示每个值等概率；填了就要和上面列表一一对应。</span>
+              <span class="field-error" id="reward-weights-error"></span>
             </label>
             <label class="checkbox">
               <input id="bonus-enabled" type="checkbox" />
-              <span>启用连签奖励</span>
+              <span class="field-label">启用连签奖励</span>
             </label>
             <label>
-              <span>连签间隔（天）</span>
+              <span class="field-label">连签间隔（天）</span>
               <input id="bonus-every" type="number" min="0" step="1" />
+              <span class="field-hint">每连续签到这么多天发放一次奖励。</span>
             </label>
             <label>
-              <span>连签奖励积分</span>
+              <span class="field-label">连签奖励积分</span>
               <input id="bonus-points" type="number" min="0" step="1" />
+              <span class="field-hint">达标时额外发放的积分。</span>
             </label>
           </div>
           <div class="row-end">
-            <button id="save-rewards" class="btn primary" type="button">保存规则</button>
+            <button id="save-rewards" class="btn btn-primary" type="button">保存规则</button>
           </div>
         </div>
       </section>
@@ -90,56 +117,84 @@
           <div class="card-head">
             <h2>商品管理</h2>
             <div class="row-end">
-              <button id="preview-shop" class="btn ghost" type="button">预览商店图</button>
-              <button id="new-product" class="btn primary" type="button">新增商品</button>
+              <button id="preview-shop" class="btn btn-secondary" type="button">预览商店图</button>
+              <button id="new-product" class="btn btn-primary" type="button">新增商品</button>
             </div>
           </div>
-          <p id="preview-hint" class="muted"></p>
-          <table class="table" id="product-table">
-            <thead>
-              <tr>
-                <th>图片</th>
-                <th>名称</th>
-                <th>价格</th>
-                <th>库存</th>
-                <th>限购</th>
-                <th>分类</th>
-                <th>状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-          <p id="product-empty" class="empty">还没有商品，点「新增商品」开始吧。</p>
+          <p id="preview-hint" class="muted">商品会按这里的顺序出现在商店图里；点「预览商店图」可导出预览图，下架的商品不出图，但历史兑换记录不受影响。</p>
+
+          <div class="table-wrap">
+            <table class="table" id="product-table">
+              <thead>
+                <tr>
+                  <th>图片</th>
+                  <th>名称</th>
+                  <th class="num">价格</th>
+                  <th class="num">库存</th>
+                  <th class="num">限购</th>
+                  <th>分类</th>
+                  <th>状态</th>
+                  <th class="actions">操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="empty-state" id="product-empty" hidden>
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7.5 4.6 19a1.5 1.5 0 0 0 1.5 1.3h11.8A1.5 1.5 0 0 0 19.4 19L21 7.5" />
+              <path d="M3 7.5h18" />
+              <path d="M8.5 7.5V5.6A2.1 2.1 0 0 1 10.6 3.5h2.8a2.1 2.1 0 0 1 2.1 2.1v1.9" />
+            </svg>
+            <p class="empty-title">还没有商品</p>
+            <p class="empty-hint">点右上角「新增商品」添加第一个商品，保存后商店图会立刻用上它。</p>
+          </div>
         </div>
       </section>
 
       <section class="panel" data-panel="users">
         <div class="card">
           <h2>用户积分</h2>
+          <p class="muted">按昵称 / QQ / user_key 搜索，或按平台过滤；「调整积分」会记一条带备注的流水。</p>
           <div class="filters">
             <input id="user-keyword" type="search" placeholder="搜索昵称 / QQ / user_key" />
             <input id="user-platform" type="text" placeholder="平台（如 qq）" />
-            <button id="user-search" class="btn" type="button">搜索</button>
+            <button id="user-search" class="btn btn-secondary" type="button">搜索</button>
           </div>
-          <table class="table" id="user-table">
-            <thead>
-              <tr>
-                <th>用户</th>
-                <th>平台</th>
-                <th>积分</th>
-                <th>连签</th>
-                <th>累计打卡</th>
-                <th>最后打卡</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+
+          <div class="table-wrap">
+            <table class="table" id="user-table">
+              <thead>
+                <tr>
+                  <th>用户</th>
+                  <th>平台</th>
+                  <th class="num">积分</th>
+                  <th class="num">连签</th>
+                  <th class="num">累计打卡</th>
+                  <th>最后打卡</th>
+                  <th class="actions">操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="empty-state" id="user-empty" hidden>
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M16.5 20v-1.6a3.6 3.6 0 0 0-3.6-3.6H7.1A3.6 3.6 0 0 0 3.5 18.4V20" />
+              <circle cx="10" cy="7.6" r="3.6" />
+              <path d="M20.5 20v-1.6a3.6 3.6 0 0 0-2.7-3.5" />
+              <path d="M15.6 4.2a3.6 3.6 0 0 1 0 6.9" />
+            </svg>
+            <p class="empty-title">没有匹配的用户</p>
+            <p class="empty-hint">清空关键词后点「搜索」看全部；机器人有人打过卡后用户就会出现在这里。</p>
+          </div>
+
           <div class="pager">
-            <button id="user-prev" class="btn ghost" type="button">上一页</button>
+            <button id="user-prev" class="btn btn-secondary" type="button">上一页</button>
             <span id="user-page" class="muted"></span>
-            <button id="user-next" class="btn ghost" type="button">下一页</button>
+            <button id="user-next" class="btn btn-secondary" type="button">下一页</button>
           </div>
         </div>
       </section>
@@ -149,12 +204,12 @@
           <div class="card-head">
             <h2>兑换记录</h2>
             <div class="row-end">
-              <button id="email-test" class="btn ghost" type="button">发送测试邮件</button>
+              <button id="email-test" class="btn btn-secondary" type="button">发送测试邮件</button>
             </div>
           </div>
           <p class="muted">
             标记「已发放」时会私聊/会话通知用户；如果开启了邮件通知，还会按 SMTP 配置给用户发一封发放邮件。
-            收件地址优先用用户绑定的邮箱（<code>/绑定邮箱 邮箱</code>），其次用「QQ 号 + 配置的默认后缀」，最后用配置里的兜底收件人。
+            收件地址优先用用户绑定的邮箱（<code id="bind-cmd">/绑定邮箱 邮箱</code>），其次用「QQ 号 + 配置的默认后缀」，最后用配置里的兜底收件人。
             SMTP 服务器、账号、授权码都在 AstrBot 插件配置页里填，「发送测试邮件」可以先用兜底收件人验证配置。
           </p>
           <div class="filters">
@@ -164,25 +219,39 @@
               <option value="已发放">已发放</option>
               <option value="已取消">已取消</option>
             </select>
-            <button id="redeem-search" class="btn" type="button">筛选</button>
+            <button id="redeem-search" class="btn btn-secondary" type="button">筛选</button>
           </div>
-          <table class="table" id="redeem-table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>用户</th>
-                <th>商品</th>
-                <th>消耗</th>
-                <th>状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+
+          <div class="table-wrap">
+            <table class="table" id="redeem-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>用户</th>
+                  <th>商品</th>
+                  <th class="num">消耗</th>
+                  <th>状态</th>
+                  <th class="actions">操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="empty-state" id="redeem-empty" hidden>
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M5 3.5h14v17l-2.3-1.6-2.4 1.6-2.3-1.6-2.3 1.6-2.4-1.6L5 20.5v-17Z" />
+              <path d="M9 8.5h6" />
+              <path d="M9 12.5h6" />
+            </svg>
+            <p class="empty-title">还没有兑换记录</p>
+            <p class="empty-hint">换个状态筛选，或点「筛选」清空条件重新拉取；用户兑换后会实时出现在这里。</p>
+          </div>
+
           <div class="pager">
-            <button id="redeem-prev" class="btn ghost" type="button">上一页</button>
+            <button id="redeem-prev" class="btn btn-secondary" type="button">上一页</button>
             <span id="redeem-page" class="muted"></span>
-            <button id="redeem-next" class="btn ghost" type="button">下一页</button>
+            <button id="redeem-next" class="btn btn-secondary" type="button">下一页</button>
           </div>
         </div>
       </section>
@@ -190,115 +259,144 @@
       <section class="panel" data-panel="settings">
         <div class="card">
           <h2>展示与行为设置</h2>
+          <p class="muted">这里改的是商店图上的文案与兑换确认行为，保存后会同步写回插件配置页。</p>
           <div class="form-grid">
             <label>
-              <span>商店标题</span>
+              <span class="field-label">商店标题</span>
               <input id="set-title" type="text" />
+              <span class="field-hint">商店图顶部的标题。</span>
             </label>
             <label class="wide">
-              <span>商店副标题</span>
+              <span class="field-label">商店副标题</span>
               <input id="set-subtitle" type="text" />
+              <span class="field-hint">标题下的一行说明，建议写清兑换方式。</span>
             </label>
             <label>
-              <span>榜单长度</span>
+              <span class="field-label">榜单长度</span>
               <input id="set-board-size" type="number" min="1" max="100" step="1" />
+              <span class="field-hint">积分榜显示前几名（1-100）。</span>
             </label>
             <label>
-              <span>榜单范围</span>
+              <span class="field-label">榜单范围</span>
               <select id="set-board-scope">
                 <option value="platform">本平台</option>
                 <option value="global">全平台</option>
               </select>
+              <span class="field-hint">榜单是只看当前平台，还是所有平台一起排。</span>
             </label>
             <label>
-              <span>确认超时（秒）</span>
+              <span class="field-label">确认超时（秒）</span>
               <input id="set-timeout" type="number" min="10" max="600" step="10" />
+              <span class="field-hint">用户回复「是 / 否」的等待时间，超时自动取消。</span>
             </label>
             <label>
-              <span>每日重置小时</span>
+              <span class="field-label">每日重置小时</span>
               <input id="set-reset-hour" type="number" min="0" max="23" step="1" />
+              <span class="field-hint">几点算新的一天（0-23），会影响"今日打卡"。</span>
             </label>
             <label>
-              <span>积分作用域</span>
+              <span class="field-label">积分作用域</span>
               <select id="set-scope">
                 <option value="platform_user">同平台用户共享</option>
                 <option value="conversation">按会话隔离（预留）</option>
               </select>
+              <span class="field-hint">决定积分记在用户身上还是会话上。</span>
+            </label>
+            <label class="wide">
+              <span class="field-label">指令前缀（仅显示）</span>
+              <input id="set-prefix" type="text" maxlength="8" placeholder="/" />
+              <span class="field-hint" id="prefix-hint">只影响提示语和卡片上指令的写法，不改实际触发。</span>
             </label>
           </div>
           <div class="row-end">
-            <button id="save-settings" class="btn primary" type="button">保存设置</button>
+            <button id="save-settings" class="btn btn-primary" type="button">保存设置</button>
           </div>
         </div>
       </section>
     </main>
 
     <div class="modal" id="product-modal" hidden>
-      <div class="modal-card">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="product-modal-title">
         <h3 id="product-modal-title">新增商品</h3>
+        <p class="muted">名称和价格是必填；库存 / 限购留空表示不限。图片会在保存后单独上传。</p>
         <div class="form-grid">
           <label class="wide">
-            <span>名称</span>
-            <input id="p-name" type="text" maxlength="40" />
+            <span class="field-label">名称</span>
+            <input id="p-name" type="text" maxlength="40" placeholder="例如：冰镇可乐" />
+            <span class="field-error" id="p-name-error"></span>
           </label>
           <label>
-            <span>价格（积分）</span>
-            <input id="p-cost" type="number" min="0" step="1" />
+            <span class="field-label">价格（积分）</span>
+            <input id="p-cost" type="number" min="0" step="1" placeholder="0" />
+            <span class="field-hint">兑换一次要花多少积分。</span>
+            <span class="field-error" id="p-cost-error"></span>
           </label>
           <label>
-            <span>库存（留空 = 不限量）</span>
+            <span class="field-label">库存（留空 = 不限量）</span>
             <input id="p-stock" type="number" min="0" step="1" placeholder="不限量" />
+            <span class="field-hint">填 0 表示暂时兑完。</span>
+            <span class="field-error" id="p-stock-error"></span>
           </label>
           <label>
-            <span>每人限购（留空 = 不限购）</span>
+            <span class="field-label">每人限购（留空 = 不限购）</span>
             <input id="p-limit" type="number" min="0" step="1" placeholder="不限购" />
+            <span class="field-hint">同一个用户最多兑换几次。</span>
+            <span class="field-error" id="p-limit-error"></span>
           </label>
           <label>
-            <span>分类</span>
-            <input id="p-category" type="text" maxlength="20" />
+            <span class="field-label">分类</span>
+            <input id="p-category" type="text" maxlength="20" placeholder="默认" />
+            <span class="field-hint">留空按「默认」处理。</span>
           </label>
           <label class="wide">
-            <span>描述</span>
-            <input id="p-desc" type="text" maxlength="200" />
+            <span class="field-label">描述</span>
+            <input id="p-desc" type="text" maxlength="200" placeholder="显示在商品名下方的一句话" />
+            <span class="field-hint">最多 200 字。</span>
           </label>
           <label class="checkbox">
             <input id="p-enabled" type="checkbox" />
-            <span>上架</span>
+            <span class="field-label">上架</span>
           </label>
           <label class="wide">
-            <span>商品图片（png/jpg/webp/gif，≤5MB）</span>
+            <span class="field-label">商品图片（png/jpg/webp/gif，≤5MB）</span>
             <input id="p-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+            <span class="field-hint">不传图片时商店图用商品名首字占位。</span>
           </label>
         </div>
-        <div class="modal-preview"><img id="p-preview" alt="" hidden /></div>
-        <div class="row-end">
-          <button id="p-cancel" class="btn ghost" type="button">取消</button>
-          <button id="p-save" class="btn primary" type="button">保存商品</button>
+        <div class="modal-preview"><img id="p-preview" alt="商品图片预览" hidden /></div>
+        <div class="modal-actions">
+          <button id="p-cancel" class="btn btn-secondary" type="button">取消</button>
+          <button id="p-save" class="btn btn-primary" type="button">保存商品</button>
         </div>
       </div>
     </div>
 
     <div class="modal" id="adjust-modal" hidden>
-      <div class="modal-card small">
-        <h3>调整用户积分</h3>
+      <div class="modal-card small" role="dialog" aria-modal="true" aria-labelledby="adjust-title">
+        <h3 id="adjust-title">调整用户积分</h3>
         <p id="adjust-user" class="muted"></p>
         <div class="form-grid">
           <label>
-            <span>增量（可为负）</span>
+            <span class="field-label">增量（可为负）</span>
             <input id="a-delta" type="number" step="1" value="0" />
+            <span class="field-hint">正数加分、负数扣分。</span>
+            <span class="field-error" id="a-delta-error"></span>
           </label>
           <label>
-            <span>或直接设为</span>
+            <span class="field-label">或直接设为</span>
             <input id="a-absolute" type="number" min="0" step="1" placeholder="留空表示用增量" />
+            <span class="field-hint">填了就以这个数为准，忽略增量。</span>
+            <span class="field-error" id="a-absolute-error"></span>
           </label>
           <label class="wide">
-            <span>备注</span>
-            <input id="a-note" type="text" maxlength="100" />
+            <span class="field-label">备注</span>
+            <input id="a-note" type="text" maxlength="100" placeholder="例如：活动奖励" />
+            <span class="field-hint">会记进调整流水，方便日后对账。</span>
           </label>
         </div>
-        <div class="row-end">
-          <button id="a-cancel" class="btn ghost" type="button">取消</button>
-          <button id="a-save" class="btn primary" type="button">确认调整</button>
+        <div class="modal-actions">
+          <button id="a-cancel" class="btn btn-secondary" type="button">取消</button>
+          <button id="a-save" class="btn btn-primary" type="button">确认调整</button>
         </div>
       </div>
     </div>
@@ -309,9 +407,9 @@
       <div class="modal-card small" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
         <h3 id="confirm-title">请确认</h3>
         <p id="confirm-text" class="muted"></p>
-        <div class="row-end">
-          <button id="confirm-cancel" class="btn ghost" type="button">取消</button>
-          <button id="confirm-ok" class="btn danger" type="button">确定</button>
+        <div class="modal-actions">
+          <button id="confirm-cancel" class="btn btn-secondary" type="button">取消</button>
+          <button id="confirm-ok" class="btn btn-danger" type="button">确定</button>
         </div>
       </div>
     </div>

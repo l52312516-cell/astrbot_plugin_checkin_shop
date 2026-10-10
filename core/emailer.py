@@ -241,8 +241,16 @@ async def send_mail(
     to_address: str,
     subject: str,
     body: str,
+    command_prefix: str = "/",
 ) -> tuple[bool, str]:
     """发送一封邮件。
+
+    Args:
+        settings: SMTP 配置。
+        to_address: 收件地址。
+        subject: 主题。
+        body: 正文。
+        command_prefix: 提示语里显示的指令前缀（默认 ``/``）。
 
     Returns:
         ``(是否发送成功, 给管理员看的结果说明)``。
@@ -253,7 +261,11 @@ async def send_mail(
     if missing:
         return False, f"邮件配置不完整（缺少 {'、'.join(missing)}）"
     if not is_email(to_address):
-        return False, "没有可用的收件地址（配置里填「兜底收件人」，或让用户用 /绑定邮箱 绑定）"
+        prefix = str(command_prefix or "").strip() or "/"
+        return False, (
+            "没有可用的收件地址（配置里填「兜底收件人」，"
+            f"或让用户用 {prefix}绑定邮箱 绑定）"
+        )
     message = build_message(
         settings=settings, to_address=to_address, subject=subject, body=body
     )

@@ -33,6 +33,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "reset_hour": 0,
     "shop_title": "积分商店",
     "shop_subtitle": "引用确认消息并回复 是/否 即可完成兑换",
+    # 只影响提示语/卡片里"指令怎么写"，不改变 AstrBot 真正接受的唤醒前缀
+    "display_prefix": "/",
 }
 
 DEFAULT_REWARDS: dict[str, Any] = {

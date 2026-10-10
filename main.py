@@ -78,6 +78,7 @@ CONFIG_SETTINGS: tuple[tuple[str, str], ...] = (
     ("reset_hour", "reset_hour"),
     ("shop_title", "shop_title"),
     ("shop_subtitle", "shop_subtitle"),
+    ("display_prefix", "display_prefix"),
 )
 CONFIG_REWARDS: tuple[tuple[str, str], ...] = (
     ("checkin_mode", "mode"),
@@ -271,12 +272,26 @@ class CheckinShopPlugin(Star):
         self._apply_config(data)
         return data
 
+    def _display_prefix(self) -> str:
+        """提示语/卡片里显示的指令前缀（只影响文案，不参与消息匹配）。
+
+        优先用**运行数据**里的值：插件页保存时会同时写运行数据与插件配置页，
+        而配置页只在热重载后才生效，读运行数据才能让插件页的改动立刻反映到文案上。
+        运行数据还没建好时退回插件配置页的值（种子数据也用这个）。
+        """
+        data = self.store.snapshot()
+        settings = data.get("settings") if isinstance(data, dict) else None
+        if isinstance(settings, dict) and "display_prefix" in settings:
+            return business.display_prefix(settings)
+        return business.normalize_display_prefix(self._cfg("display_prefix"))
+
     def _palette(self) -> render.CardPalette:
         """构造卡片尺寸配置。"""
         return render.CardPalette(
             width=int(self._cfg("render_width", 0) or render.DEFAULT_WIDTH),
             font_size_base=int(self._cfg("render_font_size_base", 0) or 0),
             font_path=str(self._cfg("render_font_path", "") or ""),
+            command_prefix=self._display_prefix(),
         )
 
     # ------------------------------------------------------------------ 事件工具
@@ -428,7 +443,10 @@ class CheckinShopPlugin(Star):
         user_key = str(record.get("user_key") or "")
         recipient = self.email_recipient(user_key, data)
         if not recipient:
-            return "未发邮件：该用户没绑定邮箱（可用 /绑定邮箱 绑定），也没配置兜底收件人"
+            return (
+                "未发邮件：该用户没绑定邮箱"
+                f"（可用 {self._display_prefix()}绑定邮箱 绑定），也没配置兜底收件人"
+            )
         shop_settings = data.get("settings") or {}
         body = emailer.redemption_mail_body(
             nickname=str(record.get("nickname") or ""),
@@ -443,6 +461,7 @@ class CheckinShopPlugin(Star):
             to_address=recipient,
             subject=emailer.REDEMPTION_SUBJECT,
             body=body,
+            command_prefix=business.display_prefix(shop_settings),
         )
         if not ok:
             logger.warning(
@@ -475,6 +494,7 @@ class CheckinShopPlugin(Star):
             body=emailer.test_mail_body(
                 shop_title=str(shop_settings.get("shop_title") or "积分商店")
             ),
+            command_prefix=business.display_prefix(shop_settings),
         )
         if not ok:
             logger.warning("[打卡商店] 测试邮件未发出：%s（%s）", message, settings.sender_label())
@@ -607,7 +627,7 @@ class CheckinShopPlugin(Star):
         text = (
             f"打卡成功！本次获得 {outcome.points} 积分{bonus_line}\n"
             f"连签 {outcome.streak} 天 · 当前积分 {outcome.total}\n"
-            "发送 /商店 看看能换点什么吧～"
+            f"发送 {self._display_prefix()}商店 看看能换点什么吧～"
         )
         # 有了这行，'指令没反应' 就能一眼分清是"插件没跑到"还是"发出去了但没到用户手上"
         logger.info(
@@ -632,7 +652,9 @@ class CheckinShopPlugin(Star):
         if getattr(event, "is_at_or_wake_command", False):
             return  # 标准指令已经接管，别重复回复
         name = str(event.get_message_str() or "").strip().strip("!！。.、~～,，?？")
-        yield event.plain_result(business.bare_command_hint(name))
+        yield event.plain_result(
+            business.bare_command_hint(name, self._display_prefix())
+        )
 
     async def _points_card(self, user_key: str, fallback_name: str = ""):
         """返回"我的积分"卡片渲染回调（闭包，供 :meth:`_send` 调用）。"""
@@ -686,7 +708,11 @@ class CheckinShopPlugin(Star):
         """商店帮助：渲染一张说明当前指令与积分规则的帮助图。"""
         data = await self.store.data(self._seed())
         view = business.build_help_view(data)
-        text = f"{view.title}\n发送 /打卡 赚积分，发送 /商店 查看商品。"
+        prefix = business.display_prefix(data.get("settings"))
+        text = (
+            f"{view.title}\n"
+            f"发送 {prefix}打卡 赚积分，发送 {prefix}商店 查看商品。"
+        )
 
         def card() -> str:
             return render.render_help(
@@ -702,7 +728,8 @@ class CheckinShopPlugin(Star):
     async def cmd_bind_email(self, event: AstrMessageEvent, 邮箱: GreedyStr = ""):
         """绑定邮箱：设置接收兑换发放邮件的收件地址。
 
-        用法：``/绑定邮箱 123@qq.com`` 绑定；``/绑定邮箱`` 查看；``/绑定邮箱 解绑`` 清除。
+        用法：``绑定邮箱 123@qq.com`` 绑定；``绑定邮箱`` 查看；``绑定邮箱 解绑`` 清除
+        （文档里的指令前缀以插件配置页的「显示用的指令前缀」为准）。
         """
         user_key = self._user_key(event)
         value = str(邮箱 or "").strip()
@@ -736,11 +763,12 @@ class CheckinShopPlugin(Star):
         name = self._sender_name(event)
         data = await self.store.data(self._seed())
         user = (data.get("users") or {}).get(user_key) or {}
+        prefix = business.display_prefix(data.get("settings"))
         text = (
             f"当前积分：{int(user.get('points') or 0)}\n"
             f"连签 {int(user.get('streak') or 0)} 天 · "
             f"累计打卡 {int(user.get('checkin_count') or 0)} 次\n"
-            "发送 /打卡 赚积分，/商店 查看商品"
+            f"发送 {prefix}打卡 赚积分，{prefix}商店 查看商品"
         )
         card = await self._points_card(user_key, name)
         async for result in self._send(event, text, card):
@@ -760,7 +788,9 @@ class CheckinShopPlugin(Star):
         )
         scope = "全平台" if str(settings.get("leaderboard_scope")) == "global" else "本平台"
         if not rows:
-            yield event.plain_result("还没有人打卡，发送 /打卡 抢占第一名！")
+            yield event.plain_result(
+                f"还没有人打卡，发送 {business.display_prefix(settings)}打卡 抢占第一名！"
+            )
             return
         lines = [f"积分榜（{scope}，共 {len(rows)} 人）"]
         for index, row in enumerate(rows[:10], 1):
@@ -773,7 +803,7 @@ class CheckinShopPlugin(Star):
                 rows,
                 self.store.render_dir,
                 "积分榜",
-                f"{scope} · 共 {len(rows)} 人",
+                f"{scope}",
                 self._palette(),
             )
 
@@ -784,7 +814,8 @@ class CheckinShopPlugin(Star):
     async def cmd_redeem(self, event: AstrMessageEvent, 商品名: GreedyStr = ""):
         """兑换商品：校验后给出确认提示，等待用户引用回复 是/否。
 
-        用法：``/兑换商品 可乐``、``/兑换商品 冰镇 可乐``、``/兑换 可乐``。
+        用法：``兑换商品 可乐``、``兑换商品 冰镇 可乐``、``兑换 可乐``
+        （文档里的指令前缀以插件配置页的「显示用的指令前缀」为准）。
         """
         keyword = str(商品名 or "").strip()
         user_key = self._user_key(event)
@@ -796,8 +827,10 @@ class CheckinShopPlugin(Star):
             return
         if len(candidates) > 1:
             names = "、".join(item.name for item in candidates[:8])
+            prefix = business.display_prefix(data.get("settings"))
             yield event.plain_result(
-                f"匹配到多个商品：{names}\n请把名称写得更完整，例如 /兑换商品 {candidates[0].name}"
+                f"匹配到多个商品：{names}\n"
+                f"请把名称写得更完整，例如 {prefix}兑换商品 {candidates[0].name}"
             )
             return
         product = candidates[0]
@@ -869,6 +902,7 @@ class CheckinShopPlugin(Star):
             self._bot_id(event),
             (),
             timed_out,
+            self._display_prefix(),
         )
         if not decision.handled:
             return

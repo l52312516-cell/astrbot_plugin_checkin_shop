@@ -134,6 +134,12 @@
     "type": "string",
     "default": "引用确认消息并回复 是/否 即可完成兑换"
   },
+  "display_prefix": {
+    "description": "显示用的指令前缀",
+    "type": "string",
+    "default": "/",
+    "hint": "只改「显示」，不改实际触发：插件回复、帮助图和卡片上写的指令会用它（例如填 . 就把 /打卡 显示成 .打卡）。如果你们的机器人唤醒前缀不是 /，填成实际的那个，文案就跟操作一致了；一般不用改。"
+  },
   "email_enabled": {
     "description": "启用兑换发放邮件通知",
     "type": "bool",

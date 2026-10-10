@@ -75,6 +75,11 @@ async def shop_summary(plugin) -> Any:
         data.get("rewards") or {},
         data.get("config_snapshot") or {},
     )
+    # 插件页表单直接编辑 settings，这里先补上默认值，避免旧数据里缺键导致输入框空白
+    settings = {
+        **settings,
+        "display_prefix": business.normalize_display_prefix(settings.get("display_prefix")),
+    }
     return json_response(
         {
             "settings": settings,
@@ -179,6 +184,12 @@ async def settings_save(plugin) -> Any:
     board_scope = str(payload.get("leaderboard_scope") or "platform")
     if board_scope not in ("platform", "global"):
         return error_response("榜单范围取值非法")
+    raw_prefix = str(payload.get("display_prefix") or "").strip()
+    if len(raw_prefix) > business.DISPLAY_PREFIX_MAX:
+        return error_response(
+            f"显示前缀最多 {business.DISPLAY_PREFIX_MAX} 个字符（留空表示用默认的 /）"
+        )
+    display_prefix = business.normalize_display_prefix(raw_prefix)
 
     def handler(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("settings", {}).update(
@@ -190,6 +201,7 @@ async def settings_save(plugin) -> Any:
                 "reset_hour": reset_hour,
                 "shop_title": str(payload.get("shop_title") or "积分商店")[:40],
                 "shop_subtitle": str(payload.get("shop_subtitle") or "")[:120],
+                "display_prefix": display_prefix,
             }
         )
         return {"settings": data["settings"]}

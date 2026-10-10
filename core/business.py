@@ -33,6 +33,44 @@ REASON_SOLD_OUT = "已售完"
 REASON_LIMIT = "已达限购"
 REASON_POINTS = "积分不足"
 
+# 展示用的指令前缀默认值。它只决定"提示语和卡片里把指令写成什么样"，
+# 不参与消息匹配：真正能不能触发指令仍然由 AstrBot 的唤醒前缀（wake_prefix）决定。
+DEFAULT_DISPLAY_PREFIX = "/"
+DISPLAY_PREFIX_MAX = 8
+
+
+def normalize_display_prefix(value: Any) -> str:
+    """把配置里的展示前缀整理成可用形式：空值回落 ``/``，过长截断。
+
+    Args:
+        value: 配置值（任意类型）。
+
+    Returns:
+        可直接拼在指令名前面的前缀。
+    """
+    raw = str(value if value is not None else "").strip()
+    return raw[:DISPLAY_PREFIX_MAX] if raw else DEFAULT_DISPLAY_PREFIX
+
+
+def display_prefix(settings: dict[str, Any] | None = None) -> str:
+    """取当前生效的展示前缀（运行数据里的 ``settings.display_prefix``）。"""
+    return normalize_display_prefix((settings or {}).get("display_prefix"))
+
+
+def command_text(name: str, settings: dict[str, Any] | None = None) -> str:
+    """把"不带前缀的指令名"格式化成提示语/帮助图里的写法。
+
+    Args:
+        name: 指令名（可含参数，例如 ``"兑换商品 可乐"``）；带 ``/`` 会被去掉。
+        settings: 运行数据的 ``settings`` 段。
+
+    Returns:
+        例如 ``.兑换商品 可乐``。
+    """
+    clean = str(name or "").lstrip("/")
+    prefix = display_prefix(settings)
+    return f"{prefix}{clean}" if clean else prefix
+
 
 def _as_int(value: Any, default: int = 0) -> int:
     """把任意值转成 int，失败时返回默认值。"""
@@ -200,17 +238,19 @@ class ConfirmOutcome:
     timed_out: bool = False
 
 
-def bare_command_hint(name: str) -> str:
+def bare_command_hint(name: str, prefix: str | None = None) -> str:
     """提示用户"要先唤醒机器人"（针对没带唤醒前缀的裸指令）。
 
     Args:
         name: 用户发来的指令名（不含前缀）。
+        prefix: 展示用前缀；留空用默认的 ``/``。
 
     Returns:
         一句可以直接发给用户的提示。
     """
+    command = f"{normalize_display_prefix(prefix)}{name}"
     return (
-        f"要用「{name}」得先唤醒机器人：发送 /{name}，"
+        f"要用「{name}」得先唤醒机器人：发送 {command}，"
         f"或者先 @我 再发「{name}」（前缀是 AstrBot 的唤醒词，可能被配成别的）。"
     )
 
@@ -350,6 +390,10 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
     title = str(settings.get("shop_title") or "积分商店")
     timeout = max(10, _as_int(settings.get("confirm_timeout_seconds"), 60))
     reset_hour = normalize_reset_hour(settings.get("reset_hour"), 0)
+    prefix = display_prefix(settings)
+
+    def cmd(name: str) -> str:
+        return command_text(name, settings)
 
     rules = [f"打卡积分：{reward_rule_text(rewards)}"]
     if rewards.get("streak_bonus_enabled"):
@@ -369,19 +413,25 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
 
     return HelpView(
         title=f"{title} · 帮助",
-        subtitle="打卡赚积分，积分可以兑换商品。以下指令需要先唤醒机器人（/ 前缀、@ 机器人或引用机器人消息）。",
+        subtitle=(
+            "打卡赚积分，积分可以兑换商品。"
+            f"以下指令需要先唤醒机器人（{prefix} 前缀、@ 机器人或引用机器人消息）。"
+        ),
         commands=[
-            ("/打卡", "每天一次，按后台配置发放积分（别名 /签到）"),
-            ("/商店", "查看自己能兑换和暂时换不了的商品"),
-            ("/我的积分", "查看积分、连签天数与最近记录（别名 /积分）"),
-            ("/积分榜", "查看本平台积分排行（别名 /排行榜）"),
-            ("/兑换商品 名称", "发起兑换，机器人会问你是否确认（别名 /兑换）"),
-            ("/绑定邮箱 邮箱", "绑定收件邮箱（发放邮件用）；不带参数查看，填「解绑」清除"),
-            ("/商店帮助", "就是这张图（别名 /打卡帮助）"),
+            (cmd("打卡"), f"每天一次，按后台配置发放积分（别名 {cmd('签到')}）"),
+            (cmd("商店"), "查看自己能兑换和暂时换不了的商品"),
+            (cmd("我的积分"), f"查看积分、连签天数与最近记录（别名 {cmd('积分')}）"),
+            (cmd("积分榜"), f"查看本平台积分排行（别名 {cmd('排行榜')}）"),
+            (cmd("兑换商品 名称"), f"发起兑换，机器人会问你是否确认（别名 {cmd('兑换')}）"),
+            (
+                cmd("绑定邮箱 邮箱"),
+                "绑定收件邮箱（发放邮件用）；不带参数查看，填「解绑」清除",
+            ),
+            (cmd("商店帮助"), f"就是这张图（别名 {cmd('打卡帮助')}）"),
         ],
         rules=rules,
         steps=[
-            "发送 /兑换商品 可乐（名称可以是商品的一部分）",
+            f"发送 {cmd('兑换商品 可乐')}（名称可以是商品的一部分）",
             "机器人回复确认提示后，引用那条消息回复 是",
             "积分与库存当场扣除，管理员在后台标记发放状态",
             "需要取消时引用确认消息回复 否",
@@ -412,7 +462,7 @@ def find_products(data: dict[str, Any], name: str) -> tuple[list[Product], str]:
     """
     keyword = (name or "").strip()
     if not keyword:
-        return [], "请带上商品名，例如：/兑换商品 可乐"
+        return [], f"请带上商品名，例如：{command_text('兑换商品 可乐', data.get('settings'))}"
     products = [item for item in all_products(data) if item.enabled]
     exact = [item for item in products if item.name == keyword]
     if exact:
@@ -426,7 +476,9 @@ def find_products(data: dict[str, Any], name: str) -> tuple[list[Product], str]:
     ]
     if partial:
         return partial, ""
-    return [], f"没有找到商品「{keyword}」，发送 /商店 看看有哪些吧"
+    return [], (
+        f"没有找到商品「{keyword}」，发送 {command_text('商店', data.get('settings'))} 看看有哪些吧"
+    )
 
 
 def calculate_checkin_points(
@@ -692,6 +744,7 @@ def decide_confirmation(
     bot_id: str,
     pending_ids: Iterable[str] = (),
     timed_out: bool = False,
+    command_prefix: str = "",
 ) -> ConfirmOutcome:
     """判断这次回复是否要处理，以及用户选了什么。
 
@@ -704,12 +757,14 @@ def decide_confirmation(
         bot_id: 机器人自身 ID。
         pending_ids: 本次会话记录过的机器人消息 ID。
         timed_out: 这条待确认请求是否已过期。
+        command_prefix: 展示用指令前缀（默认 ``/``）。
 
     Returns:
         处理结果；``handled=False`` 表示这条消息与本插件无关，应放行。
     """
     stripped = (text or "").strip()
     decision = parse_decision(stripped)
+    prefix = normalize_display_prefix(command_prefix)
     if pending is None or decision == "unknown":
         # 没有等待确认的兑换请求时，群里的每一句"好/不/ok"都不该被机器人插一句
         # "当前没有等待确认的兑换请求"——这类消息一律放行给其他指令 / 大模型。
@@ -727,7 +782,7 @@ def decide_confirmation(
             product_name=pending.product_name,
             message=(
                 f"上一次兑换「{pending.product_name}」的确认已超时，"
-                f"请重新发送 /兑换商品 {pending.product_name}"
+                f"请重新发送 {prefix}兑换商品 {pending.product_name}"
             ),
         )
     if not matched:
@@ -740,7 +795,7 @@ def decide_confirmation(
                 message=(
                     f"如果要确认兑换「{pending.product_name}」，"
                     "请「引用」机器人那条确认消息再回复 是/否；"
-                    f"也可以重新发送 /兑换商品 {pending.product_name}"
+                    f"也可以重新发送 {prefix}兑换商品 {pending.product_name}"
                 ),
             )
         return ConfirmOutcome(
@@ -749,7 +804,7 @@ def decide_confirmation(
             product_name=pending.product_name,
             message=(
                 "引用的消息不是本次兑换确认（编号不匹配）。\n"
-                f"请引用上一条确认消息回复 是/否，或重新发送 /兑换商品 {pending.product_name}"
+                f"请引用上一条确认消息回复 是/否，或重新发送 {prefix}兑换商品 {pending.product_name}"
             ),
         )
     return ConfirmOutcome(
