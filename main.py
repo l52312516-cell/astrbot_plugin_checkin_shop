@@ -52,7 +52,7 @@ except ImportError:  # AstrBot 把 main.py 当顶层模块加载
     from core.store import Store, default_data  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
-PLUGIN_VERSION = "1.2.2"
+PLUGIN_VERSION = "1.2.4"
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)")
@@ -394,7 +394,9 @@ class CheckinShopPlugin(Star):
             try:
                 # 渲染是 CPU 密集的同步操作（Pillow 画图 + PNG 编码 + 落盘），直接在事件
                 # 循环里跑会卡住其它会话；丢到线程里执行，事件循环继续处理别的消息。
-                path = str(await asyncio.to_thread(card) or "")
+                path = str(
+                    await asyncio.to_thread(self._render_card, card) or ""
+                )
             except Exception:
                 logger.exception("[打卡商店] 图片渲染失败，已降级为文本")
         if path and not text:
@@ -405,6 +407,17 @@ class CheckinShopPlugin(Star):
             return
         if text:
             yield event.plain_result(text)
+
+    def _render_card(self, card: Any) -> str:
+        """在工作线程里出图（渲染是 CPU 密集的同步操作，别占事件循环）。
+
+        注意这里**不做**缓存清理：缓存文件名是内容哈希，命中时直接把已有文件交给
+        调用方，而 AstrBot 紧接着还要读它去做 base64——任何"写完之后"的删除都会
+        撞上"写完了、还没被读"的窗口，并发下必然出现"返回了一个不存在的路径"
+        （两种删法都被实测推翻过，详见 `core/render.prune_render_dir` 的注释）。
+        因此渲染目录只增不减；一张卡片只有几十 KB，这个代价可以接受。
+        """
+        return str(card() or "")
 
     def mail_settings(self) -> emailer.MailSettings:
         """读取插件配置页里的 SMTP 设置。"""
@@ -647,18 +660,81 @@ class CheckinShopPlugin(Star):
 
     @filter.regex(BARE_COMMAND_RE)
     async def on_bare_command(self, event: AstrMessageEvent):
-        """兜住"没带唤醒前缀的裸指令"，回一句用法说明而不是装死。
+        """兜住"指令没被正式 handler 接住"的情况，回一句用法说明而不是装死。
 
-        AstrBot 的标准指令只在消息以 wake_prefix 开头（或 @ 了机器人 / 私聊）时才会
-        触发，新用户很容易直接发「打卡」，此时命令过滤器根本不匹配、机器人毫无反应。
-        正则过滤器不受 wake_prefix 约束，所以这里能给出提示。
+        AstrBot 的标准指令受两重约束：既要被唤醒（``wake_prefix`` / @机器人 / 私聊），
+        又要求消息**以指令名开头**（``core/star/filter/command.py`` 里是
+        ``message_str == full_cmd or message_str.startswith(full_cmd + " ")``）。
+        正则过滤器只看正文，所以这里能兜住"看起来是指令、其实没匹配上"的消息。
+
+        **不能用 ``is_at_or_wake_command`` 当"已经被接住"的判据**：waking_check 只要看到
+        @机器人 / @全体 / 引用了机器人自己 / 私聊，就把它置为 True，与指令是否匹配无关。
+        典型漏网场景是**被唤醒 + 指令名后面带标点**：``@我 打卡！``、私聊里的 ``签到。``。
+        这类消息 command 过滤器匹配不上（它不做标点剥离），若这里再因为"已唤醒"提前
+        return，用户就什么都收不到——这正是"指令偶尔无法正常触发"的成因之一。
+
+        正确的判据是"本插件有没有**别的正式 handler**被激活"：由 :meth:`_other_handlers_active`
+        读取事件上的 ``activated_handlers`` extra，并排除本兜底 handler 自己、以及订阅了
+        ``EventMessageType.ALL`` 因而永远在列表里的确认流程 handler。
         """
-        if getattr(event, "is_at_or_wake_command", False):
-            return  # 标准指令已经接管，别重复回复
+        if self._other_handlers_active(event):
+            return  # 本插件的正式指令已经在处理这条消息，别重复回复
         name = str(event.get_message_str() or "").strip().strip("!！。.、~～,，?？")
+        if not name:
+            return
         yield event.plain_result(
             business.bare_command_hint(name, self._display_prefix())
         )
+
+    #: 这些 handler **不**代表"指令已被接住"，不能用来让兜底提示闭嘴：
+    #: ``on_bare_command`` 是兜底提示自己（它被调用时必然在 activated_handlers 里，
+    #: 拿它当判据会让这个判断恒为真、提示永远发不出去）；``on_confirm_message`` 订阅了
+    #: ``EventMessageType.ALL``，任何消息都会激活它，同样没有区分能力。
+    _NON_COMMAND_HANDLERS = frozenset({"on_bare_command", "on_confirm_message"})
+
+    def _other_handlers_active(self, event: AstrMessageEvent) -> bool:
+        """本插件是否有**正式指令** handler 被这条消息激活。
+
+        AstrBot 在 waking_check 阶段把命中的 handler 存进事件的 ``activated_handlers``
+        extra，并用 ``handler_module_path`` 标识它属于哪个插件（形如
+        ``data.plugins.<插件目录名>.main``，见 star_manager.py）。这里按**本插件的数据
+        目录名**比对（而不是 ``PLUGIN_ID``），用户重命名插件目录后依然成立。
+
+        读取失败时返回 False —— 宁可多回一句提示，也不要因为读不到而装死。
+
+        Args:
+            event: 当前消息事件。
+
+        Returns:
+            除兜底提示与确认流程之外，本插件是否还有 handler 被激活。
+        """
+        try:
+            handlers = event.get_extra("activated_handlers", [])
+        except Exception:
+            return False
+        for item in handlers or []:
+            if not self._is_own_handler(item):
+                continue
+            if str(getattr(item, "handler_name", "") or "") in self._NON_COMMAND_HANDLERS:
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _is_own_handler(handler: Any) -> bool:
+        """判断一个 activated handler 是否属于本插件。
+
+        Args:
+            handler: ``activated_handlers`` 里的一项。
+
+        Returns:
+            属于本插件返回 True；读不到模块路径时返回 False。
+        """
+        module = str(getattr(handler, "handler_module_path", "") or "")
+        if not module:
+            return False
+        directory = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+        return f".{directory}." in module or module.startswith(f"{directory}.")
 
     async def _points_card(self, user_key: str, fallback_name: str = ""):
         """返回"我的积分"卡片渲染回调（闭包，供 :meth:`_send` 调用）。"""

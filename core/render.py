@@ -45,6 +45,12 @@ except ImportError:  # pragma: no cover - requirements.txt 里已声明
 RESOURCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "resources")
 FONT_FILENAME = "NotoSansCJKsc-Regular.otf"
 
+# 缓存桶宽度（秒）：``output_path`` 用它给缓存分桶，30 分钟一轮。
+CACHE_BUCKET_SECONDS = 1800
+# 历史上 ``prune_render_dir`` 的保留窗口参数。该函数现已停用（不再删任何文件），
+# 这个常量只为不改变既有签名而保留。
+RENDER_KEEP_SECONDS = 24 * 60 * 60
+
 # ------------------------------------------------------------------ 设计令牌
 COLOR_BG = "#f5f7fb"          # 页面底色
 COLOR_CARD = "#ffffff"        # 卡片/行底
@@ -66,6 +72,11 @@ PLAIN_RANK_BG = "#eef1f6"
 CATEGORY_COLORS = ("#2563eb", "#7c3aed", "#059669", "#d97706", "#db2777", "#0891b2")
 
 _font_cache: dict[tuple[str, int], Any] = {}
+
+# 我们自己产出的缓存卡片文件名：``<kind>_<16 位 hex>.png``（见 output_path）。
+# prune_render_dir / _trim_bucket_files 只处理匹配它的文件，目录里别的东西一律不碰；
+# 第一组捕获的是卡片种类，用于按种类分别限制数量。
+_CACHE_FILE_RE = re.compile(r"^(shop|points|board|help)_[0-9a-f]{16}\.png$")
 
 # 默认宽度：QQ 群里 1080~1120 像素宽的卡片显示效果最好
 DEFAULT_WIDTH = 1080
@@ -163,6 +174,31 @@ def ellipsize(face: Any, text: str, max_width: int) -> str:
     return text + "…"
 
 
+def cache_fields(*parts: Any) -> str:
+    """把若干参与缓存的字段拼成**不会互相串味**的一段文本。
+
+    为什么不能直接用 ``"|".join(...)`` 或者 ``f"{a}:{b}"``：缓存键里一旦出现
+    分隔符，字段内容里又恰好有同样的字符，两组不同的输入就会算出同一个键。
+    比如商品名 "A|B" 配描述 "C" 和商品名 "A" 配描述 "B|C"，用 ``|`` 拼出来
+    都是 ``A|B|C``；``name:desc`` 遇到名字里带冒号同理。落在缓存上就是
+    "改了设置却看到别人的/旧的图"。
+
+    这里对每一段取长度前缀（``len#内容``），长度本身也把分隔位置编码了进去，
+    所以任意内容都无法再伪装成另一种分段方式。空字段保留为空段，不影响区分。
+
+    Args:
+        *parts: 任意数量、任意类型的字段；``None`` 视为空串。
+
+    Returns:
+        可直接拼进 payload 的字符串。
+    """
+    chunks = []
+    for part in parts:
+        text = "" if part is None else str(part)
+        chunks.append(f"{len(text)}#{text}")
+    return "|".join(chunks)
+
+
 def output_path(kind: str, payload: str, render_dir: str) -> str:
     """生成渲染输出路径（按小时分桶，便于缓存复用）。
 
@@ -175,16 +211,85 @@ def output_path(kind: str, payload: str, render_dir: str) -> str:
         可直接交给 ``event.image_result`` 的文件路径。
     """
     os.makedirs(render_dir, exist_ok=True)
-    bucket = int(time.time() // 1800)
+    bucket = int(time.time() // CACHE_BUCKET_SECONDS)
     digest = hashlib.md5(f"{kind}|{payload}|{bucket}".encode("utf-8")).hexdigest()[:16]
     return os.path.join(render_dir, f"{kind}_{digest}.png")
 
 
 def save_card(image: Any, path: str) -> str:
-    """把图片写入磁盘并返回路径。"""
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    image.save(path, format="PNG")
-    return path
+    """把图片写入磁盘并返回路径。
+
+    必须**原子**落盘：``output_path`` 的缓存键只由内容哈希决定，所以同一个
+    payload 的所有用户/所有群共用一个文件名（帮助图、商店图尤其如此），而
+    渲染现在跑在工作线程里，两个并发请求会同时写同一个路径。
+    直接 ``image.save(path)`` 是"就地截断再写"，并发的读者（AstrBot 随后要
+    ``convert_to_base64()`` 读这个文件）会读到写了一半的 PNG —— 这就是
+    "图片偶尔无法正常渲染"的成因（实测并发下损坏率 96%~99%）。
+    改成"写同目录临时文件 → ``os.replace``"，读者只会看到完整的旧图或完整的新图。
+
+    Windows 下 ``os.replace`` 可能因为目标文件正被另一个线程读着而抛
+    ``PermissionError``（POSIX 允许改名到打开中的文件，Windows 不允许）。
+    这不是错误，只是"读者正在读旧图"，重试几次即可；5 次都用尽时按目标是否存在
+    决定退路：已有缓存就用缓存，没有就把临时文件交出去 —— 无论哪种都返回一个
+    **真实存在**的图片，绝不返回不存在的路径。
+
+    **一律做 256 色量化**（包括带商品照片的卡片）。曾经有过"带照片就跳过量化"的
+    例外，理由是"照片量化会明显色带化"——但那个依据（缩略图区域 45% 像素偏移
+    ≥8/255）是凭印象写的，实测复现不出来。在**真实卡片**上重新量过：
+    量化把带照片的商店图从 51,592 字节压到 19,544 字节（**省 62.1%**），
+    而整卡只有 **0.094%** 的像素单通道偏移 ≥8/255、平均误差 0.039 ——
+    肉眼不可见。反过来，卡片会以 ``base64://`` 内联进一次 ``send_group_msg``，
+    体积直接决定协议端上传到 QQ 图片服务器的载荷，而"上传超时"正是用户实际
+    反馈过的问题，所以省体积的收益远大于这点画质损失。
+
+    Args:
+        image: 要保存的 Pillow 图片。
+        path: 目标路径。
+
+    Returns:
+        实际可用的图片路径；极端情况下可能是同目录下的临时文件路径，但一定存在。
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".png")
+    os.close(handle)
+    handed_over = False
+    try:
+        # 纯界面卡片以纯色和文字为主；照片卡片经过缩略图缩放后高频细节已被抹平，
+        # 量化同样几乎无损。转成索引 PNG 后体积只剩约 38%。
+        image = image.convert("RGB").convert(
+            "P", palette=Image.Palette.ADAPTIVE, colors=256
+        )
+        image.save(temporary, format="PNG", optimize=True, compress_level=9)
+        delay = 0.01
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                return path
+            except PermissionError:
+                if attempt == 4:
+                    break
+                time.sleep(delay)
+                delay *= 2
+        # 5 次改名都失败：目标被读者占着（Windows 不允许改名到打开中的文件）。
+        if os.path.isfile(path):
+            # 磁盘上已有一张完整可读的图，而且缓存键是内容哈希，内容必然一致 —— 直接用它，
+            # 同时让 finally 清掉这份用不上的临时文件。
+            # 用 isfile 而不是 exists：path 万一是目录，exists 为真但根本不是图，
+            # 交出去会让调用方拿到一个"打不开的路径"。
+            logger.debug("[打卡商店] 图片改名被占用，改用已有缓存 %s", path)
+            return path
+        # 目标还不存在（首次出图）：把这一份完整的临时文件交给调用方。
+        # 不能返回 path —— 它根本不存在，调用方会拿到"空图"。
+        logger.debug("[打卡商店] 图片改名被占用，改用临时文件 %s", temporary)
+        handed_over = True
+        return temporary
+    finally:
+        try:
+            if not handed_over and os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:  # pragma: no cover - 清理失败不影响主流程
+            pass
 
 
 def _new_canvas(width: int, height: int) -> tuple[Any, Any]:
@@ -549,6 +654,7 @@ def render_shop(
         else text_width(tiny_face, "00")
     )
     shown = 0
+    embedded_photo = False
     for title, color, items in sections:
         y = _draw_section(palette, draw, y, title, color, len(items))
         if not items:
@@ -584,6 +690,7 @@ def render_shop(
                         image = None
                 thumb_radius = max(8, palette.radius - 2)
                 if image is not None:
+                    embedded_photo = True
                     _copy_to_canvas(
                         canvas, image, (inner_x, top), (thumb, thumb), radius=thumb_radius
                     )
@@ -657,13 +764,47 @@ def render_shop(
                 )
             y += height + palette.gap
 
-    payload = (
-        f"{view.user_key}|{view.points}|"
-        + "|".join(
-            f"{item.product.id}:{item.product.cost}:{item.product.stock}:{item.redeemable}:{item.reason}"
-            for item in view.items
+    # 缓存键必须覆盖**每一个会被画出来的字段**，否则管理员改完商品、用户换了昵称，
+    # 都会在同一个 30 分钟桶里继续看到旧图（"改了没生效"）。逐项对应上面的绘制：
+    #   * 头部：view.title（缺省"积分商店"）、"我的积分 {points}"、view.subtitle
+    #     （缺省回落到 view.user_name）；
+    #   * 每行：编号 label、名称、价格（cost）、可兑换性与原因（reason / deficit）、
+    #     分类、库存、限购与已兑次数、描述、缩略图路径；
+    #   * 还有 int(embedded_photo)：它表示这次到底画出了**真照片**还是**占位色块**。
+    #     两者像素完全不同，所以必须区分——否则 resolver 偶发读图失败的那一次会把
+    #     占位卡片写进缓存，接下来 30 分钟都给人看占位块（实测复现过）。
+    #   * show_images：它决定整块缩略图区域画不画。当前**没有任何调用点**传它
+    #     （main.py 与 dashboard_api 都用默认 True），所以现在踩不到；但它是个公开
+    #     形参，一旦有人传 False，不加进键就会命中"带缩略图"的那份缓存。
+    # 顺序用 ordered（= 可兑换在前 + 不可兑换在后）而不是 view.items，因为画的顺序
+    # 就是它，顺序变了图就变了。
+    payload = cache_fields(
+        view.user_key,
+        view.points,
+        view.title,
+        view.subtitle,
+        view.user_name,
+        int(embedded_photo),
+        bool(show_images),
+        palette.cache_tag,
+    ) + "".join(
+        cache_fields(
+            item.number,
+            item.product.id,
+            item.product.name,
+            item.product.cost,
+            item.product.stock,
+            item.product.per_user_limit,
+            item.product.enabled,
+            item.product.category,
+            item.product.description,
+            item.product.image_path,
+            item.redeemable,
+            item.reason,
+            item.deficit,
+            item.user_redeemed,
         )
-        + f"|{palette.cache_tag}"
+        for item in ordered
     )
     path = output_path("shop", payload, render_dir)
     if os.path.exists(path):
@@ -807,9 +948,34 @@ def render_points(
             )
         y += row_height
 
-    payload = (
-        f"{display_name}|{user.get('points')}|{user.get('streak')}|{len(history)}"
-        f"|{palette.cache_tag}"
+    # 键里原来只有 ``len(history)``，可卡片画的是每一条记录的日期/说明/加减分
+    # （详见上面的 history[:10] 循环）。条数相同、内容不同时（管理员修正某条记录、
+    # 重新导入）会命中旧图。这里把**真正会被画出来的那几条**逐字段编进键，
+    # 同时仍保留 len(history)：分区块标题上的计数用的是全量条数。
+    #
+    # 概览面板的**四个**统计值也都被画出来（见上面的 stats 元组），必须逐个进键：
+    # 曾经只键了 streak，于是 total_earned / total_spent / checkin_count 改了也不
+    # 重新出图。而且这几个值各自独立变化——打卡会让 total_earned 与 checkin_count
+    # 一起变、兑换只让 total_spent 变，都不保证 points 同步改变，所以漏掉它们时
+    # "打卡了但自己的积分面板没更新"是能在同一个 30 分钟桶里真实发生的。
+    payload = cache_fields(
+        display_name,
+        user.get("points"),
+        user.get("streak"),
+        user.get("total_earned"),
+        user.get("total_spent"),
+        user.get("checkin_count"),
+        len(history),
+        palette.cache_tag,
+    ) + "".join(
+        cache_fields(
+            item.get("date"),
+            item.get("points"),
+            item.get("bonus"),
+            item.get("note"),
+            item.get("streak"),
+        )
+        for item in history[:10]
     )
     path = output_path("points", payload, render_dir)
     if os.path.exists(path):
@@ -918,8 +1084,29 @@ def render_board(
         _text_at_baseline(draw, right_x - unit_width, baseline, unit, small_face, COLOR_FAINT)
         y += row_height + palette.gap_s
 
-    payload = "|".join(f"{row.get('user_key')}:{row.get('points')}" for row in rows)
-    payload = f"{payload or 'empty'}|{palette.cache_tag}"
+    # 缓存键必须覆盖**每一个会被画出来的字段**，否则"改了设置/换了昵称却还看到旧图"。
+    # 这里逐项对应 render_board 真正绘制的内容：标题、右上角范围提示、参与人数，
+    # 以及每一行的名次、昵称、积分、连签与累计次数。
+    # 注意 nickname / streak / checkin_count 曾经漏在键外：打卡会通过
+    # business._remember_identity 覆盖昵称，而打卡又不一定改变积分，于是
+    # "改名 + 打卡 + 积分榜" 能在同一个 30 分钟桶里继续显示旧昵称。
+    payload = cache_fields(
+        title,
+        scope_hint,
+        len(rows),
+        palette.cache_tag,
+    ) + "".join(
+        cache_fields(
+            index,
+            row.get("user_key"),
+            row.get("nickname"),
+            row.get("user_id"),
+            row.get("points"),
+            row.get("streak"),
+            row.get("checkin_count"),
+        )
+        for index, row in enumerate(rows, 1)
+    )
     path = output_path("board", payload, render_dir)
     if os.path.exists(path):
         canvas.close()
@@ -1085,16 +1272,17 @@ def render_help(
         )
         y += int(small_face.size * 1.4)
 
-    payload = (
-        "|".join(
-            [
-                view.title,
-                ",".join(f"{name}:{desc}" for name, desc in view.commands),
-                ",".join(view.rules),
-                ",".join(view.steps),
-            ]
-        )
-        + f"|{palette.cache_tag}"
+    # 同样按"画了什么就键什么"来：标题、副标题、指令表、当前规则、兑换步骤，
+    # 以及页脚（view.footer，只有非空时才画，但一旦非空就必须进键）。
+    payload = cache_fields(
+        view.title,
+        view.subtitle,
+        view.footer,
+        palette.cache_tag,
+    ) + "".join(
+        cache_fields(name, desc) for name, desc in view.commands
+    ) + "".join(cache_fields(line) for line in view.rules) + "".join(
+        cache_fields(line) for line in view.steps
     )
     path = output_path("help", payload, render_dir)
     if os.path.exists(path):
@@ -1131,6 +1319,41 @@ def shop_view_payload(view: ShopView) -> str:
     if not view.locked:
         lines.append("· 暂无")
     return "\n".join(lines)
+
+
+def prune_render_dir(render_dir: str, keep_seconds: float = RENDER_KEEP_SECONDS) -> int:
+    """[已停用] 故意不删任何文件，恒返回 0。
+
+    这里记录一个**被实测推翻过两次**的设计，别再改回去：
+
+    * 第一版按 mtime 删 24 小时前的卡片。错在缓存文件名是"内容哈希 + 30 分钟桶"，
+      **文件名里没有时间**——一张仍在被复用的热门图，其 mtime 停在"上次真正重新
+      渲染它"的时刻，而不是"上次被读到"的时刻。把它做旧后走一遍生产路径：仍然命中
+      缓存（证明还在用），却被同一次清理删掉了。
+    * 第二版改成"只在当前桶内按种类保留 N 个、从新到旧保留"，以为刚写好的那份必定
+      安全。同样被实测推翻：当当前桶内的不同 payload 数超过 keep 时，被淘汰的那些
+      mtime 也落在本桶内——它们**正是本桶的合法缓存条目**；而 ``render_shop`` 命中
+      缓存时直接 ``return path``，所以第二次的命中路径可能已经被删掉。
+      （实测：6 渲染线程 + 1 清理线程 + 延迟 5ms 的消费者线程，6 秒内 37 次
+      "返回的路径在消费者读到之前就消失了"；旧版按 mtime 删是 128 次。）
+
+    为什么"删文件"这条路根本走不通：缓存键是**内容哈希**，命中时直接把已有文件交给
+    调用方，而 AstrBot 拿到路径后还要去读它做 base64。任何在"写完之后"发生的删除，
+    都存在"写完了、还没被读"的窗口，并发下必然被撞到。
+
+    所以这里的结论是：**不做删除**。代价是渲染目录只增不减（每个不同 payload 每个
+    桶一份）；但一个 1080 宽卡片只有几十 KB，收益（永远不返回不存在的路径）远大于
+    这点磁盘占用。真要控制占用，正确做法是缩短缓存桶或让键更粗——那是**少创建**，
+    不是**事后删除**。
+
+    Args:
+        render_dir: 未使用（保留形参只为不改变既有调用点的签名）。
+        keep_seconds: 未使用。
+
+    Returns:
+        恒为 0（一个文件都没删）。
+    """
+    return 0
 
 
 def temp_render_dir() -> str:

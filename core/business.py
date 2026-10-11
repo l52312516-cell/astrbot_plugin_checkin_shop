@@ -279,7 +279,11 @@ class ConfirmOutcome:
 
 
 def bare_command_hint(name: str, prefix: str | None = None) -> str:
-    """提示用户"要先唤醒机器人"（针对没带唤醒前缀的裸指令）。
+    """提示用户这条指令该怎么发才能被机器人接住。
+
+    注意**不要**写"得先唤醒机器人"：这条提示在被 @ 唤醒 / 私聊的场景下也会发
+    （指令名后面带了标点，命令过滤器不做标点剥离，所以匹配不上），那时用户明明
+    已经唤醒过了，再让他"先唤醒"只会让人更困惑。所以措辞只讲**前缀**。
 
     Args:
         name: 用户发来的指令名（不含前缀）。
@@ -290,8 +294,8 @@ def bare_command_hint(name: str, prefix: str | None = None) -> str:
     """
     command = f"{normalize_display_prefix(prefix)}{name}"
     return (
-        f"要用「{name}」得先唤醒机器人：发送 {command}，"
-        f"或者先 @我 再发「{name}」（前缀是 AstrBot 的唤醒词，可能被配成别的）。"
+        f"没认出「{name}」，指令要带上前缀才会响应：发送 {command}。"
+        f"（前缀是 AstrBot 的唤醒词，可能被配成别的；也支持 @我 之后再发指令名。）"
     )
 
 

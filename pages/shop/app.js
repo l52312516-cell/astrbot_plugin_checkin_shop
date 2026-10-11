@@ -965,7 +965,12 @@ async function updateRedemption(record, status, restore) {
     await loadSummary();
     const notice = result.notice ? `，${result.notice}` : '';
     const email = result.email ? `，${result.email}` : '';
-    say(`${result.message || '已更新'}${notice}${email}`, 'ok');
+    // 邮件失败时后端返回的是"邮件发送失败：…"，不能塞进绿色成功提示里当好消息
+    const emailFailed = Boolean(result.email) && /失败|错误|不完整|没有可用/.test(result.email);
+    say(
+      `${result.message || '已更新'}${notice}${email}`,
+      emailFailed ? 'error' : 'ok',
+    );
   } catch (error) {
     say(`操作失败：${errorText(error)}`, 'error');
   }
