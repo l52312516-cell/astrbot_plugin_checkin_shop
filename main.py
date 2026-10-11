@@ -51,21 +51,21 @@ except ImportError:  # AstrBot 把 main.py 当顶层模块加载
     from core.store import Store, default_data  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)")
 
 
 def _format_ts(value: Any) -> str:
-    """把时间戳格式化成邮件里好读的本地时间；无效值返回空串。"""
+    """把时间戳格式化成邮件里好读的本地时间（UTC+8）；无效值返回空串。"""
     try:
         stamp = float(value)
     except (TypeError, ValueError):
         return ""
     if stamp <= 0:
         return ""
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+    return business.format_moment(stamp)
 
 # 插件配置页（_conf_schema.json）与运行数据里重复出现的字段。
 # 两边都能改，规则是"配置页优先"，但升级时如果配置页还是默认值，则保留

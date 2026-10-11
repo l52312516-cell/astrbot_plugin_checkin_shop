@@ -10,16 +10,27 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Iterable
 
 try:  # 作为包被导入（测试 / AstrBot 包加载）
     from . import emailer
     from .store import Store
-    from .timeutil import logical_date_str, normalize_reset_hour, previous_day
+    from .timeutil import (
+        PLUGIN_TIMEZONE,
+        describe_next_reset,
+        format_moment,
+        logical_date_str,
+        normalize_reset_hour,
+        previous_day,
+    )
 except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 core/
     import emailer  # type: ignore[no-redef]
     from store import Store  # type: ignore[no-redef]
     from timeutil import (  # type: ignore[no-redef]
+        PLUGIN_TIMEZONE,
+        describe_next_reset,
+        format_moment,
         logical_date_str,
         normalize_reset_hour,
         previous_day,
@@ -507,9 +518,9 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
     else:
         rules.append("连签奖励：未开启")
     rules.append(
-        "统计口径：每天 0 点算新的一天"
+        "统计口径：每天 0 点算新的一天（北京时间 UTC+8）"
         if reset_hour == 0
-        else f"统计口径：每天 {reset_hour} 点之后算新的一天"
+        else f"统计口径：每天 {reset_hour} 点之后算新的一天（北京时间 UTC+8）"
     )
     rules.append(f"兑换确认：{timeout} 秒内引用确认消息回复 是 / 否")
     rules.append("发放通知：兑换记录被标记「已发放」后，机器人会私聊通知你（开启邮件通知时同时发邮件）")
@@ -715,9 +726,14 @@ def perform_checkin(
     today = logical_date_str(now, reset_hour)
     last = str(user.get("last_checkin_date") or "")
     if last == today:
+        # 说清"下一次什么时候能打"，否则用户只会看到一句"明天再来吧"，
+        # 分不清是日期算错还是真的打过卡了。
         return CheckinOutcome(
             success=False,
-            message="今天已经打过卡啦，明天再来吧～",
+            message=(
+                "今天已经打过卡啦，明天再来吧～\n"
+                f"下次可打卡：{describe_next_reset(now, reset_hour)}"
+            ),
             streak=_as_int(user.get("streak")),
             total=_as_int(user.get("points")),
             date=today,
@@ -1156,12 +1172,14 @@ def _ledger_bound(value: Any, *, upper: bool) -> float | None:
     elif re.fullmatch(r"\d{13}", text):
         stamp = float(text) / 1000.0
     else:
+        # 用 UTC+8 解析，和"今天是哪天"（timeutil.PLUGIN_TIMEZONE）保持同一套口径，
+        # 否则容器里 TZ=UTC 时，用户按本地日期筛出来的区间会整体偏 8 小时。
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"):
             try:
-                parsed = time.strptime(text, fmt)
+                parsed = datetime.strptime(text, fmt).replace(tzinfo=PLUGIN_TIMEZONE)
             except ValueError:
                 continue
-            stamp = time.mktime(parsed)
+            stamp = parsed.timestamp()
             if fmt == "%Y-%m-%d" and upper:
                 stamp += 86399
             elif fmt == "%Y-%m-%d %H:%M" and upper:
@@ -1255,7 +1273,7 @@ def ledger_csv(data: dict[str, Any], keyword: str = "", kind: str = "", start: A
         points = _as_int(entry.get("points"))
         writer.writerow(
             [
-                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_as_float(entry.get("created_at")))),
+                format_moment(_as_float(entry.get("created_at")), "%Y-%m-%d %H:%M:%S"),
                 str(entry.get("nickname") or ""),
                 str(entry.get("user_key") or "").split(":", 1)[0],
                 str(entry.get("user_id") or ""),
