@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -51,7 +52,7 @@ except ImportError:  # AstrBot 把 main.py 当顶层模块加载
     from core.store import Store, default_data  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.2.2"
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)")
@@ -386,11 +387,14 @@ class CheckinShopPlugin(Star):
             event: 当前消息事件。
             text: 文本内容；为空时不发文本。
             card: 零参出图回调（同步函数，返回图片路径）；为 None 或渲染失败时只发文本。
+                回调会被丢到工作线程里执行，不要在回调里碰事件循环对象。
         """
         path = ""
         if card is not None:
             try:
-                path = str(card() or "")
+                # 渲染是 CPU 密集的同步操作（Pillow 画图 + PNG 编码 + 落盘），直接在事件
+                # 循环里跑会卡住其它会话；丢到线程里执行，事件循环继续处理别的消息。
+                path = str(await asyncio.to_thread(card) or "")
             except Exception:
                 logger.exception("[打卡商店] 图片渲染失败，已降级为文本")
         if path and not text:

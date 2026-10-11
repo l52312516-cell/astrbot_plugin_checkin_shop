@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import re
 import tempfile
@@ -31,7 +30,9 @@ except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 co
     import business  # type: ignore[no-redef]
     from business import HelpView, ProductState, ShopView  # type: ignore[no-redef]
 
-logger = logging.getLogger("astrbot")
+# 上架规范：日志记录器必须且只能从 astrbot.api 导入，严禁使用内置 logging 模块。
+# 单元测试环境没有 AstrBot，由 tests/conftest.py 提供 astrbot.api 的最小替身。
+from astrbot.api import logger
 
 try:
     from PIL import Image, ImageDraw, ImageFont

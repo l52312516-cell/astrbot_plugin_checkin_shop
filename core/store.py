@@ -15,12 +15,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import logging
 import os
 import time
 from typing import Any, Callable
 
-logger = logging.getLogger("astrbot")
+# 上架规范：日志记录器必须且只能从 astrbot.api 导入，严禁使用内置 logging 模块。
+# 单元测试环境没有 AstrBot，由 tests/conftest.py 提供 astrbot.api 的最小替身。
+from astrbot.api import logger
 
 STORE_FILE_NAME = "shop.json"
 SCHEMA_VERSION = 1
@@ -191,7 +192,9 @@ class Store:
             加载后的数据字典。
         """
         async with self._get_lock():
-            return self._open_locked(seed)
+            # 读文件 + JSON 解析（必要时还要初始化落盘）都是同步阻塞操作，
+            # 放到线程里做，避免在事件循环里卡住其它会话。
+            return await asyncio.to_thread(self._open_locked, seed)
 
     def _open_locked(self, seed: dict[str, Any] | None = None) -> dict[str, Any]:
         self.ensure_directories()
@@ -278,7 +281,9 @@ class Store:
             snapshot = copy.deepcopy(data)
             result = handler(snapshot)
             self._warn_if_externally_changed()
-            self._write(snapshot)
+            # 整库 JSON 序列化 + fsync 是同步阻塞操作（库越大越慢），在事件循环里会
+            # 拖住同进程的其它会话；丢到线程里，写锁仍然只由本协程持有。
+            await asyncio.to_thread(self._write, snapshot)
             self._data = snapshot
             return result
 

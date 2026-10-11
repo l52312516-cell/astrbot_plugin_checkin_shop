@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -542,7 +543,10 @@ async def preview_card(plugin) -> Any:
     data = await plugin.store.data(plugin._seed())
     view = business.build_shop_view(data, user_key, include_disabled=True)
     try:
-        path = render.render_shop(
+        # 渲染是 CPU 密集的同步操作（画图 + PNG 编码 + 落盘），丢到线程里跑，
+        # 别在事件循环里占着，否则后台预览会拖住整个 AstrBot。
+        path = await asyncio.to_thread(
+            render.render_shop,
             view,
             plugin.store.render_dir,
             None,

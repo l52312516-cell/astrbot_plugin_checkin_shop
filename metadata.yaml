@@ -11,7 +11,7 @@ description: |
   * 兑换为两步确认：回复引用消息后发送 是/否，避免误操作
   * 兑换记录在后台流转（待发放 / 已发放 / 已取消，可返还积分与库存），可删除
   * 标记发放后自动通知用户：会话提示 +（可选）SMTP 发放邮件，收件邮箱可用 /绑定邮箱 绑定
-version: v1.2.1
+version: v1.2.2
 author: AstrBot plugin community
 repo: https://github.com/l52312516-cell/astrbot_plugin_checkin_shop
 astrbot_version: ">=4.16,<5"

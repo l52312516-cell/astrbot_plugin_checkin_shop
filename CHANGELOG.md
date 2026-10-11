@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.2 - 2026-10-11
+
+- 修复上架审核被驳回的日志规范问题：`core/store.py` 与 `core/render.py` 以前用 `import logging` + `logging.getLogger("astrbot")`，违反「日志记录器必须且只能从 `astrbot.api` 导入（`from astrbot.api import logger`），严禁使用内置 `logging` 模块」的规定。现在这两个文件与 `main.py`、`core/dashboard_api.py` 一样，统一写成那条精确的导入语句（v1.2.0 因此被标记为 `Rejected`）。
+  - 出货代码里**不再有任何 `try/except ImportError` 的日志兜底**：本机跑单元测试时，由 `tests/conftest.py` 提供一个只含 `logger` 的**最小** `astrbot.api` 替身（不伪造事件/组件/注册器，避免掩盖真实导入错误），这样出货文件保持与规范字面一致。
+  - `tests/test_publish_policy.py` 增加一条守卫：凡是用到 `logger.<方法>` 的出货文件，都必须存在 `from astrbot.api import logger`，否则测试失败。
+- 采纳审核的非强制建议，事件循环不再被同步 CPU 操作占用：
+  - 出图回调（`/商店`、`/我的积分`、`/积分榜`、`/商店帮助` 的 Pillow 渲染）改在 `asyncio.to_thread` 里执行（`main.py::_send`），后台卡片预览接口同样处理（`dashboard_api.py::preview_card`）。
+  - 顺带把同样是阻塞操作的存储 I/O 一并挪出事件循环：整库 JSON 序列化 + `fsync`（`store.mutate`）、首次读盘与 JSON 解析（`store.open`）。以前一次兑换要把整个 `shop.json` 序列化两次并等待 `fsync`，都在事件循环里跑。
+  - 渲染失败仍然降级成纯文本，不会因为线程化而变成"没反应"。
+- 新增上架规范守卫测试（`tests/test_publish_policy.py`，8 项）：扫描所有**出货文件**，禁止出现内置 `logging`、`print()`、`eval/exec`、`os.system/os.popen`、`subprocess`、`pickle/marshal.loads`、`socket`、`shutil.rmtree`，强制「数据目录必须由 AstrBot 提供」（禁止 `data_v4.db` / `~/.astrbot` / `sqlite3`），并要求凡是用到 `logger` 的文件都必须从 `astrbot.api` 导入。其中一条把规则收紧成"``logging`` 这个词只许出现在注释里"——连 `__import__("logging")`、`importlib.import_module("logging")` 这类绕法也会被抓住（已逐条做过负向验证）。打包脚本 `scripts/build_release.py` 也加了**产物级**同款自检（直接读 zip 里的 `.py`），并顺带校验 `main.py` / `metadata.yaml` / `CHANGELOG.md` 三处版本号一致；自检不过时改成先写临时文件、通过后才改名上线，避免磁盘上留下"看着像正式产物其实违反规范"的 zip。
+- 测试新增专项：事件循环不被阻塞（5 项，见上）、`timeutil` 不许读取进程本地时区（1 项，任何 `fromtimestamp` 都必须显式带 `tz`）。这些断言都做过**负向验证**（把违规写法注回去，测试确实变红，随后恢复）。
+- 测试新增事件循环专项（5 项）：出图回调、存储落盘、存储读盘必须运行在**事件循环之外的工作线程**；渲染抛异常时必须降级成纯文本；以及一条"渲染 0.25 秒期间心跳协程至少跳 3 次"的活性断言。原先依赖 `caplog` 的存储告警用例改为直接替身 `store.logger`（日志不再经过标准库 `logging`，`caplog` 收不到）。
+- 测试：`pytest` 224 项、页面检查 41 项全绿。新增的日志守卫与线程化断言都做过**负向验证**（把违规写法注回去，测试确实变红，随后恢复）。
+- 发布：产物改为 `astrbot_plugin_checkin_shop-v1.2.2.zip`。
+
 ## 1.2.1 - 2026-10-11
 
 - 修复"第二天打卡却被拒"：插件以前用 `datetime.fromtimestamp`（**进程本地时区**）算"今天是哪天"。AstrBot 跑在容器里时 `TZ` 往往是 UTC，于是用户所在时区（UTC+8）的 10-11 07:00 会被算成 2026-10-10，和前一晚 10-10 23:00 的打卡算成同一天，用户第二天早上发 `/打卡` 收到的是"今天已经打过卡啦，明天再来吧～"（看起来就像"第二天打卡没反应"）。现在逻辑日期固定按 **UTC+8（北京时间）** 计算（`core/timeutil.py::PLUGIN_TIMEZONE`），与本机/容器时区无关；`reset_hour`、连签判定、`/商店帮助` 的统计口径、`/我的积分` 的打卡历史同步修正。
