@@ -52,7 +52,7 @@ except ImportError:  # AstrBot 把 main.py 当顶层模块加载
     from core.store import Store, default_data  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
-PLUGIN_VERSION = "1.2.4"
+PLUGIN_VERSION = "1.3.0"
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)")
@@ -80,6 +80,7 @@ CONFIG_SETTINGS: tuple[tuple[str, str], ...] = (
     ("shop_title", "shop_title"),
     ("shop_subtitle", "shop_subtitle"),
     ("display_prefix", "display_prefix"),
+    ("bare_command_hint_enabled", "bare_command_hint_enabled"),
 )
 CONFIG_REWARDS: tuple[tuple[str, str], ...] = (
     ("checkin_mode", "mode"),
@@ -285,6 +286,13 @@ class CheckinShopPlugin(Star):
         if isinstance(settings, dict) and "display_prefix" in settings:
             return business.display_prefix(settings)
         return business.normalize_display_prefix(self._cfg("display_prefix"))
+
+    def _bare_command_hint_enabled(self) -> bool:
+        """是否提示未匹配的裸指令；插件页保存后立即生效，默认关闭。"""
+        settings = (self.store.snapshot().get("settings") or {})
+        if "bare_command_hint_enabled" in settings:
+            return settings["bare_command_hint_enabled"] is True
+        return self._cfg("bare_command_hint_enabled", False) is True
 
     def _palette(self) -> render.CardPalette:
         """构造卡片尺寸配置。"""
@@ -677,6 +685,8 @@ class CheckinShopPlugin(Star):
         读取事件上的 ``activated_handlers`` extra，并排除本兜底 handler 自己、以及订阅了
         ``EventMessageType.ALL`` 因而永远在列表里的确认流程 handler。
         """
+        if not self._bare_command_hint_enabled():
+            return
         if self._other_handlers_active(event):
             return  # 本插件的正式指令已经在处理这条消息，别重复回复
         name = str(event.get_message_str() or "").strip().strip("!！。.、~～,，?？")

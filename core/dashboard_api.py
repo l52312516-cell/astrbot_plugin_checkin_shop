@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 import uuid
 from functools import partial
@@ -65,6 +66,31 @@ def _page_args(payload: dict[str, Any]) -> tuple[int, int]:
     )
 
 
+def _reward_integer_list(value: Any, label: str) -> tuple[list[int], str]:
+    """逐项验证奖励列表，禁止静默丢项或把小数截断成整数。"""
+    if not isinstance(value, list):
+        return [], f"{label}必须是数组"
+    if len(value) > 30:
+        return [], f"{label}最多 30 项"
+    result: list[int] = []
+    for position, item in enumerate(value, 1):
+        if type(item) is int:
+            number = item
+        elif isinstance(item, str) and re.fullmatch(r"[0-9]+", item.strip()):
+            try:
+                number = int(item.strip())
+            except ValueError:
+                return [], f"{label}第 {position} 项数值过大"
+        else:
+            return [], f"{label}第 {position} 项必须是非负整数"
+        if number < 0:
+            return [], f"{label}第 {position} 项必须是非负整数"
+        if number > 9007199254740991:
+            return [], f"{label}第 {position} 项超出安全整数范围"
+        result.append(number)
+    return result, ""
+
+
 async def shop_summary(plugin) -> Any:
     """页面首屏：设置 + 打卡规则 + 商品 + 统计。
 
@@ -80,6 +106,7 @@ async def shop_summary(plugin) -> Any:
     settings = {
         **settings,
         "display_prefix": business.normalize_display_prefix(settings.get("display_prefix")),
+        "bare_command_hint_enabled": settings.get("bare_command_hint_enabled", False) is True,
     }
     return json_response(
         {
@@ -110,28 +137,16 @@ async def rewards_save(plugin) -> Any:
         return error_response("积分不能为负数")
     if random_max < random_min:
         return error_response("随机积分上限不能小于下限")
-    custom_list = payload.get("custom_list") or []
-    if not isinstance(custom_list, list):
-        return error_response("自定义积分列表必须是数组")
-    try:
-        custom_values = [int(item) for item in custom_list]
-    except (TypeError, ValueError):
-        return error_response("自定义积分列表必须都是整数")
-    if any(item < 0 for item in custom_values):
-        return error_response("自定义积分不能为负数")
-    if len(custom_values) > 30:
-        return error_response("自定义积分列表最多 30 项")
-    raw_weights = payload.get("custom_weights") or []
-    if not isinstance(raw_weights, list):
-        return error_response("自定义权重必须是数组")
-    try:
-        weights = [int(item) for item in raw_weights]
-    except (TypeError, ValueError):
-        return error_response("自定义权重必须都是整数")
-    if any(item < 0 for item in weights):
-        return error_response("权重不能为负数")
+    custom_values, error = _reward_integer_list(payload.get("custom_list", []), "自定义积分列表")
+    if error:
+        return error_response(error)
+    weights, error = _reward_integer_list(payload.get("custom_weights", []), "自定义权重")
+    if error:
+        return error_response(error)
     if weights and len(weights) != len(custom_values):
         return error_response("权重数量必须与自定义积分数量一致")
+    if weights and not any(weights):
+        return error_response("自定义权重不能全部为 0；留空表示等概率")
     if mode == "custom" and not custom_values:
         return error_response("自定义模式下至少需要一个积分值")
     every = _payload_int(payload, "streak_bonus_every", 7)
@@ -195,6 +210,9 @@ async def settings_save(plugin) -> Any:
             f"显示前缀最多 {business.DISPLAY_PREFIX_MAX} 个字符（留空表示用默认的 /）"
         )
     display_prefix = business.normalize_display_prefix(raw_prefix)
+    bare_command_hint_enabled = payload.get("bare_command_hint_enabled", False)
+    if not isinstance(bare_command_hint_enabled, bool):
+        return error_response("未带前缀的指令提示开关必须是布尔值")
 
     def handler(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("settings", {}).update(
@@ -207,6 +225,7 @@ async def settings_save(plugin) -> Any:
                 "shop_title": str(payload.get("shop_title") or "积分商店")[:40],
                 "shop_subtitle": str(payload.get("shop_subtitle") or "")[:120],
                 "display_prefix": display_prefix,
+                "bare_command_hint_enabled": bare_command_hint_enabled,
             }
         )
         return {"settings": data["settings"]}
@@ -539,9 +558,11 @@ async def preview_card(plugin) -> Any:
     """在后台预览商店卡片（``bridge.download`` 会以 GET 请求下载）。"""
     user_key = "preview:0"
     if request is not None:
-        user_key = str(request.query.get("user_key", "preview:0") or "preview:0")
+        user_key = str(request.query.get("user_key", "preview:0") or "preview:0").strip() or "preview:0"
     data = await plugin.store.data(plugin._seed())
-    view = business.build_shop_view(data, user_key, include_disabled=True)
+    if user_key != "preview:0" and not isinstance((data.get("users") or {}).get(user_key), dict):
+        return error_response("预览用户不存在，请重新选择用户", status_code=404)
+    view = business.build_shop_view(data, user_key, include_disabled=False)
     try:
         # 渲染是 CPU 密集的同步操作（画图 + PNG 编码 + 落盘），丢到线程里跑，
         # 别在事件循环里占着，否则后台预览会拖住整个 AstrBot。
@@ -549,7 +570,7 @@ async def preview_card(plugin) -> Any:
             render.render_shop,
             view,
             plugin.store.render_dir,
-            None,
+            plugin._image_resolver(),
             plugin._palette(),
         )
     except Exception as exc:

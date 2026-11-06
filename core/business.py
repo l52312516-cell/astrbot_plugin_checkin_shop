@@ -868,21 +868,19 @@ def match_confirm_reply(
 ) -> bool:
     """判断用户的回复是否引用了本次确认提示。
 
-    分层匹配（任一层通过即可）：编号 token → 机器人消息 ID → 引用发送者是机器人。
+    只接受本次完整编号或本次提示的可信消息 ID；发送者相同本身不能证明引用正确。
     """
     text = (quote_text or "").strip()
-    if pending.token and pending.token in text:
-        return True
-    quoted_id = str(quote_id or "").strip()
-    if quoted_id and quoted_id in {str(item) for item in pending_ids if item}:
-        return True
-    if not text and not quoted_id:
-        # 平台完全没有给出引用信息（既没有正文也没有 ID）时无法校验，按未匹配处理
-        return False
     sender = str(quote_sender_id or "").strip()
-    if sender and str(bot_id or "").strip() and sender == str(bot_id).strip():
-        return True
-    return False
+    bot = str(bot_id or "").strip()
+    if sender and bot and sender != bot:
+        return False
+    # 明确引用其它确认编号时优先拒绝，不能用机器人身份或消息 ID 掩盖冲突。
+    tokens = set(re.findall(r"(?<![A-Za-z0-9_-])SHOP-[A-Za-z0-9_-]+", text))
+    if tokens:
+        return bool(pending.token) and tokens == {pending.token}
+    quoted_id = str(quote_id or "").strip()
+    return bool(quoted_id) and quoted_id in {str(item).strip() for item in pending_ids if item}
 
 
 def parse_decision(text: str) -> str:
@@ -915,7 +913,7 @@ def decide_confirmation(
         quote_id: 被引用消息 ID。
         quote_sender_id: 被引用消息发送者。
         bot_id: 机器人自身 ID。
-        pending_ids: 本次会话记录过的机器人消息 ID。
+        pending_ids: 本次确认提示的可信发送回执消息 ID。
         timed_out: 这条待确认请求是否已过期。
         command_prefix: 展示用指令前缀（默认 ``/``）。
 
@@ -1002,6 +1000,15 @@ def perform_redemption(
     product = Product.from_dict(product_raw)
     if not product.enabled:
         return False, f"「{product.name}」已下架，本次兑换已取消", _as_int(user.get("points")), ""
+    if product.cost != pending.cost:
+        retry = command_text(f"兑换商品 {product.name}", data.get("settings"))
+        return (
+            False,
+            f"「{product.name}」价格已变更（原 {pending.cost}，现 {product.cost} 积分），"
+            f"本次兑换已取消，请重新发送 {retry} 发起确认",
+            _as_int(user.get("points")),
+            "",
+        )
     if product.stock is not None and product.stock <= 0:
         return False, f"「{product.name}」库存不足，本次兑换已取消", _as_int(user.get("points")), ""
     state = product_state(data, product, pending.user_key)
@@ -1034,6 +1041,7 @@ def perform_redemption(
             "product_name": product.name,
             "cost": product.cost,
             "status": "待发放",
+            "refunded": False,
             # 记下发起兑换的会话，发放时才能主动通知本人
             "session": pending.session_key,
             "created_at": now,
@@ -1159,11 +1167,12 @@ def _ledger_matches(entry: dict[str, Any], keyword: str, kind: str) -> bool:
     return keyword.lower() in haystack
 
 
-def _ledger_bound(value: Any, *, upper: bool) -> float | None:
+def _ledger_bound(value: Any, *, upper: bool) -> tuple[float, bool] | None:
     """把日期/时间戳筛选项解析成时间戳边界。
 
     支持 ``1699999999``（秒）、``1699999999000``（毫秒）、``2026-10-11``、
-    ``2026-10-11 08:30``。上边界按"那一整天/那一分钟的最后一刻"取，保证当天的记录不会被漏掉。
+    ``2026-10-11 08:30``。返回 ``(时间戳, 是否为排他上界)``。
+    日期和分钟的结束条件使用下一日/分钟的排他上界，精确时间戳仍包含端点。
     """
     if value in (None, "", 0, "0"):
         return None
@@ -1171,6 +1180,7 @@ def _ledger_bound(value: Any, *, upper: bool) -> float | None:
     if not text:
         return None
     stamp: float | None = None
+    exclusive = False
     if re.fullmatch(r"\d{10}", text):
         stamp = float(text)
     elif re.fullmatch(r"\d{13}", text):
@@ -1184,12 +1194,14 @@ def _ledger_bound(value: Any, *, upper: bool) -> float | None:
             except ValueError:
                 continue
             stamp = parsed.timestamp()
-            if fmt == "%Y-%m-%d" and upper:
-                stamp += 86399
+            if fmt in ("%Y-%m-%d", "%Y/%m/%d") and upper:
+                stamp += 86400
+                exclusive = True
             elif fmt == "%Y-%m-%d %H:%M" and upper:
-                stamp += 59
+                stamp += 60
+                exclusive = True
             break
-    return stamp
+    return (stamp, exclusive) if stamp is not None else None
 
 
 def filter_ledger(
@@ -1216,9 +1228,9 @@ def filter_ledger(
         if not _ledger_matches(entry, keyword, kind):
             continue
         stamp = _as_float(entry.get("created_at"))
-        if low is not None and stamp < low:
+        if low is not None and stamp < low[0]:
             continue
-        if high is not None and stamp > high:
+        if high is not None and (stamp >= high[0] if high[1] else stamp > high[0]):
             continue
         rows.append(entry)
     # 时间相同的按写入顺序倒序，保证分页稳定
@@ -1535,6 +1547,8 @@ def transition_redemption(
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """更新兑换记录状态，取消时可选返还积分与回补库存。
 
+    已取消为终态；退款标记持久保存，旧记录的返还流水和系统注记也作为退款凭据。
+
     Returns:
         ``(是否成功, 提示文案, 需要通知用户的记录)``。第三项仅在"首次转为已发放"
         时非空，调用方据此给用户发提醒。
@@ -1548,10 +1562,23 @@ def transition_redemption(
     if record is None:
         return False, "兑换记录不存在", None
     previous = str(record.get("status") or "")
+    refunded = bool(record.get("refunded")) or "（积分已返还）" in str(record.get("note") or "")
+    if not refunded:
+        refunded = any(
+            isinstance(entry, dict)
+            and entry.get("type") == LEDGER_REFUND
+            and entry.get("ref") == record_id
+            for entry in data.get("ledger") or []
+        )
+    if status != "已取消" and (previous == "已取消" or refunded):
+        return False, "已取消或已返还积分的兑换记录不能重新发放，请重新发起兑换", None
     record["status"] = status
     record["note"] = note or record.get("note", "")
     record["updated_at"] = now
-    if status == "已取消" and previous != "已取消" and restore:
+    if refunded:
+        # 为可识别的旧退款记录补上持久标记，之后不再依赖可编辑的备注或有限长度的流水。
+        record["refunded"] = True
+    if status == "已取消" and previous != "已取消" and restore and not refunded:
         user = _ensure_user(data, str(record.get("user_key") or ""))
         cost = _as_int(record.get("cost"))
         user["points"] = _as_int(user.get("points")) + cost
@@ -1566,6 +1593,8 @@ def transition_redemption(
                 product["stock"] = _as_int(product.get("stock")) + 1
             product["redeemed"] = max(0, _as_int(product.get("redeemed")) - 1)
         record["note"] = (note or "已取消并返还积分") + "（积分已返还）"
+        record["refunded"] = True
+        record["refunded_at"] = now
         append_ledger(
             data,
             str(record.get("user_key") or ""),

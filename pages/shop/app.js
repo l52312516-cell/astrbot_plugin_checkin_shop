@@ -23,6 +23,7 @@ const state = {
   editingSortOrder: null,
   pendingImage: null,
   previewProductId: '',
+  previewUserKey: 'preview:0',
   adjustUserKey: '',
   assetUrls: {},
   rewardsLoaded: false,
@@ -59,6 +60,14 @@ function say(message, kind) {
   if (!box || !text) return;
   window.clearTimeout(say.timer);
   const value = message === undefined || message === null ? '' : String(message);
+  // 操作失败时提示也留在当前对话框内，避免被遮罩挡住。
+  const activeModal = topModal();
+  const modalStatus = activeModal && activeModal.querySelector('.modal-status');
+  if (modalStatus) {
+    modalStatus.textContent = kind === 'error' ? value : '';
+    modalStatus.hidden = kind !== 'error' || !value;
+    if (!modalStatus.hidden) modalStatus.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
   text.textContent = value;
   box.className = 'status' + (value && kind ? ` status-${kind}` : '');
   box.hidden = !value;
@@ -75,8 +84,12 @@ function say(message, kind) {
 async function withBusy(button, task, busyText) {
   if (!button) return task();
   if (button.dataset.busy === '1') return undefined;
-  const label = button.textContent;
+  const labelNodes = Array.from(button.childNodes);
   const wasDisabled = button.disabled;
+  const modal = button.closest('.modal');
+  const closeButtons = modal ? Array.from(modal.querySelectorAll('[data-modal-close]')) : [];
+  const closeStates = closeButtons.map((item) => item.disabled);
+  closeButtons.forEach((item) => { item.disabled = true; });
   button.dataset.busy = '1';
   button.disabled = true;
   button.classList.add('is-busy');
@@ -87,7 +100,8 @@ async function withBusy(button, task, busyText) {
     button.dataset.busy = '';
     button.disabled = wasDisabled;
     button.classList.remove('is-busy');
-    if (busyText) button.textContent = label;
+    if (busyText) button.replaceChildren(...labelNodes);
+    closeButtons.forEach((item, index) => { item.disabled = closeStates[index]; });
   }
 }
 
@@ -150,15 +164,85 @@ function applyTheme(isDark) {
 }
 
 function parseNumberList(value) {
-  return String(value || '')
+  const parts = String(value || '')
     .split(/[,，\s]+/)
-    .filter((item) => item !== '')
-    .map((item) => Number(item))
-    .filter((item) => Number.isFinite(item));
+    .filter((item) => item !== '');
+  if (parts.length > 30) return { values: [], error: '最多填写 30 项。' };
+  const values = [];
+  for (const [index, item] of parts.entries()) {
+    if (!/^\d+$/.test(item) || !Number.isSafeInteger(Number(item))) {
+      return { values: [], error: `第 ${index + 1} 项「${item}」必须是非负整数。` };
+    }
+    values.push(Number(item));
+  }
+  return { values, error: '' };
 }
 
 async function post(endpoint, body) {
   return bridge.apiPost(endpoint, body || {});
+}
+
+// 统一弹窗焦点与背景隔离；确认窗叠在其他弹窗上时只允许最上层交互。
+const modalReturnFocus = new WeakMap();
+
+function topModal() {
+  return Array.from(document.querySelectorAll('.modal:not([hidden])')).at(-1) || null;
+}
+
+function modalFocusables(modal) {
+  return Array.from(modal.querySelectorAll('button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'))
+    .filter((item) => item.getClientRects().length > 0 && !item.closest('[hidden]'));
+}
+
+function syncModalState() {
+  const active = topModal();
+  document.body.classList.toggle('has-modal', Boolean(active));
+  Array.from(document.body.children).forEach((item) => {
+    if (item.tagName !== 'SCRIPT') item.inert = Boolean(active) && item !== active;
+  });
+}
+
+function showModal(modalId, initialFocus) {
+  const modal = $(modalId);
+  modalReturnFocus.set(modal, document.activeElement);
+  const status = modal.querySelector('.modal-status');
+  if (status) { status.textContent = ''; status.hidden = true; }
+  modal.hidden = false;
+  syncModalState();
+  (initialFocus || modal.querySelector('[role="dialog"], [role="alertdialog"]')).focus();
+}
+
+function hideModal(modalId) {
+  const modal = $(modalId);
+  modal.hidden = true;
+  syncModalState();
+  const previous = modalReturnFocus.get(modal);
+  const active = topModal();
+  if (previous && previous.isConnected && !previous.closest('[inert]') && !previous.disabled) previous.focus();
+  else if (active) (modalFocusables(active)[0] || active.querySelector('[role="dialog"], [role="alertdialog"]')).focus();
+  else document.querySelector('.tab.active')?.focus();
+}
+
+function bindModalFocus() {
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Tab') return;
+    const modal = topModal();
+    if (!modal) return;
+    const controls = modalFocusables(modal);
+    if (!controls.length) {
+      event.preventDefault();
+      modal.querySelector('[role="dialog"], [role="alertdialog"]').focus();
+      return;
+    }
+    const first = controls[0];
+    const last = controls.at(-1);
+    const focused = document.activeElement;
+    if (event.shiftKey && (focused === first || !modal.contains(focused))) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && (focused === last || !modal.contains(focused))) {
+      event.preventDefault(); first.focus();
+    }
+  });
 }
 
 // 插件页运行在 sandbox="allow-scripts allow-forms allow-downloads" 的 iframe 里，
@@ -172,11 +256,10 @@ function askConfirm({ title, message, confirmText = '确定', danger = true }) {
   $('confirm-text').textContent = message || '';
   okButton.textContent = confirmText;
   okButton.className = danger ? 'btn btn-danger' : 'btn btn-primary';
-  modal.hidden = false;
-  okButton.focus();
+  showModal('confirm-modal', cancelButton);
   return new Promise((resolve) => {
     const finish = (value) => {
-      modal.hidden = true;
+      hideModal('confirm-modal');
       okButton.removeEventListener('click', onOk);
       cancelButton.removeEventListener('click', onCancel);
       modal.removeEventListener('click', onBackdrop);
@@ -203,13 +286,13 @@ function bindModalDismiss(modalId, close) {
   const modal = $(modalId);
   if (!modal) return;
   modal.addEventListener('click', (event) => {
-    if (event.target === modal) close();
+    if (event.target === modal && !modal.querySelector('.is-busy')) close();
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || modal.hidden) return;
     const confirm = $('confirm-modal');
     if (confirm && !confirm.hidden) return;
-    close();
+    if (!modal.querySelector('.is-busy')) close();
   });
 }
 
@@ -223,17 +306,17 @@ function formatStat(value) {
 function renderStats() {
   const stats = (state.summary && state.summary.statistics) || {};
   const cards = [
-    ['用户数', formatStat(stats.user_count)],
-    ['商品数', `${stats.enabled_product_count || 0} / ${stats.product_count || 0}`],
-    ['今日打卡', formatStat(stats.checkin_today)],
-    ['流通积分', formatStat(stats.total_points)],
-    ['待发放', formatStat(stats.pending_redemption_count)],
-    ['兑换总数', formatStat(stats.redemption_count)],
+    ['用户数', formatStat(stats.user_count), '参与打卡的用户', ''],
+    ['商品数', `${stats.enabled_product_count || 0} / ${stats.product_count || 0}`, '已上架 / 全部商品', ''],
+    ['今日打卡', formatStat(stats.checkin_today), '按每日重置时间统计', 'is-primary'],
+    ['流通积分', formatStat(stats.total_points), '当前用户积分总额', 'is-primary'],
+    ['待发放', formatStat(stats.pending_redemption_count), '等待处理的兑换', 'is-pending'],
+    ['兑换总数', formatStat(stats.redemption_count), '全部兑换记录', ''],
   ];
   $('stats').innerHTML = cards
     .map(
-      ([label, value]) =>
-        `<div class="stat"><b>${value}</b><span>${label}</span></div>`,
+      ([label, value, hint, className]) =>
+        `<div class="stat ${className}"><b>${value}</b><span>${label}</span><small>${hint}</small></div>`,
     )
     .join('');
 }
@@ -301,15 +384,25 @@ async function saveRewards() {
     return;
   }
   clearErrors(['reward-list', 'reward-weights']);
-  const list = parseNumberList($('reward-list').value);
-  const weights = parseNumberList($('reward-weights').value);
+  const parsedList = parseNumberList($('reward-list').value);
+  const parsedWeights = parseNumberList($('reward-weights').value);
+  if (parsedList.error) setFieldError('reward-list', parsedList.error);
+  if (parsedWeights.error) setFieldError('reward-weights', parsedWeights.error);
+  if (focusFirstInvalid(['reward-list', 'reward-weights'])) return;
+  const list = parsedList.values;
+  const weights = parsedWeights.values;
   if ($('reward-mode').value === 'custom' && list.length === 0) {
     setFieldError('reward-list', '自定义模式至少要填一个积分值，例如 5,10,20。');
     $('reward-list').focus();
     return;
   }
-  if (weights.length && list.length && weights.length !== list.length) {
+  if (weights.length && weights.length !== list.length) {
     setFieldError('reward-weights', '权重个数要和积分列表一致，或者整列留空表示等概率。');
+    $('reward-weights').focus();
+    return;
+  }
+  if (weights.length && weights.every((item) => item === 0)) {
+    setFieldError('reward-weights', '权重不能全部为 0；整列留空表示等概率。');
     $('reward-weights').focus();
     return;
   }
@@ -335,6 +428,7 @@ function fillSettingsForm(settings) {
   $('set-title').value = settings.shop_title || '';
   $('set-subtitle').value = settings.shop_subtitle || '';
   $('set-prefix').value = settings.display_prefix || '/';
+  $('set-bare-command-hint').checked = settings.bare_command_hint_enabled === true;
   $('set-board-size').value = settings.leaderboard_size ?? 20;
   $('set-board-scope').value = settings.leaderboard_scope || 'platform';
   $('set-timeout').value = settings.confirm_timeout_seconds ?? 60;
@@ -358,6 +452,7 @@ async function saveSettings() {
     shop_title: $('set-title').value,
     shop_subtitle: $('set-subtitle').value,
     display_prefix: $('set-prefix').value.trim(),
+    bare_command_hint_enabled: $('set-bare-command-hint').checked,
     leaderboard_size: Number($('set-board-size').value || 20),
     leaderboard_scope: $('set-board-scope').value,
     confirm_timeout_seconds: Number($('set-timeout').value || 60),
@@ -677,14 +772,13 @@ function openProduct(product) {
   state.editingSortOrder = editing ? Number(product.sort_order) || 0 : null;
   state.pendingImage = null;
   renderProductPreview();
-  $('product-modal').hidden = false;
-  $('p-name').focus();
+  showModal('product-modal', $('p-name'));
 }
 
 function closeProduct() {
   const modal = $('product-modal');
   if (modal.querySelector('.is-busy')) return;
-  modal.hidden = true;
+  hideModal('product-modal');
 }
 
 function renderProductPreview() {
@@ -706,6 +800,7 @@ function renderProductPreview() {
 }
 
 async function saveProduct() {
+  $('product-modal-status').hidden = true;
   clearErrors(['p-name', 'p-cost', 'p-stock', 'p-limit']);
   const name = $('p-name').value.trim();
   const cost = readInteger('p-cost', { allowEmpty: false, min: 0 });
@@ -734,17 +829,28 @@ async function saveProduct() {
   };
   const saved = await post('shop/products/save', payload);
   const productId = (saved.product && saved.product.id) || state.previewProductId;
+  // 新商品已经落盘；后续上传失败时也必须按这个 ID 更新，不能再次新增。
+  if (productId) {
+    state.previewProductId = productId;
+    state.editingSortOrder = Number(saved.product?.sort_order ?? payload.sort_order);
+    $('product-modal-title').textContent = `编辑商品：${name}`;
+  }
   const file = $('p-image').files && $('p-image').files[0];
   if (file && productId) {
-    await bridge.upload(`shop/products/image/upload?product_id=${encodeURIComponent(productId)}`, file);
+    try {
+      await bridge.upload(`shop/products/image/upload?product_id=${encodeURIComponent(productId)}`, file);
+    } catch (error) {
+      say(`商品已保存，图片上传失败，可重试：${errorText(error)}`, 'error');
+      return;
+    }
   } else if (file && !productId) {
     say('商品已保存，但图片未上传：接口没有返回商品 ID，请重试', 'error');
     await loadSummary();
     return;
   }
-  $('product-modal').hidden = true;
   state.assetUrls = {};
   await loadSummary();
+  hideModal('product-modal');
   say('商品已保存', 'ok');
 }
 
@@ -772,12 +878,38 @@ async function deleteProduct(product, trigger) {
 async function previewShop() {
   const hint = $('preview-hint');
   try {
-    await bridge.download('shop/preview', {}, 'shop-preview.png');
-    hint.textContent = '预览图已开始下载（浏览器下载栏可见）；商店图与用户在群里看到的完全一致。';
+    await bridge.download('shop/preview', { user_key: state.previewUserKey }, 'shop-preview.png');
+    const selection = $('preview-user').selectedOptions[0]?.textContent || '模拟用户，0 积分';
+    hint.textContent = `预览图已开始下载（浏览器下载栏可见），当前视角：${selection}。下架商品不出图，图片与可兑换状态使用用户端同一规则。`;
   } catch (error) {
     hint.textContent = `预览失败：${errorText(error)}`;
     say(`预览失败：${errorText(error)}`, 'error');
   }
+}
+
+async function searchPreviewUsers() {
+  const result = await post('shop/users', {
+    keyword: $('preview-user-keyword').value.trim(),
+    page: 1,
+    page_size: PAGE_SIZE,
+  });
+  const select = $('preview-user');
+  select.replaceChildren(new Option('模拟用户，0 积分', 'preview:0'));
+  for (const user of result.items || []) {
+    const key = String(user.user_key || '');
+    if (!key || key === 'preview:0') continue;
+    const identity = `${user.platform || key.split(':')[0]}:${user.user_id || key.split(':').slice(1).join(':')}`;
+    select.add(new Option(`${user.nickname || user.user_id || key} · ${identity} · ${user.points ?? 0} 积分`, key));
+  }
+  if (Array.from(select.options).some((option) => option.value === state.previewUserKey)) {
+    select.value = state.previewUserKey;
+  } else {
+    state.previewUserKey = 'preview:0';
+  }
+  const count = (result.items || []).length;
+  $('preview-user-result').textContent = Number(result.total || 0) > count
+    ? `显示前 ${count} 位，请输入更具体的昵称或 ID 缩小范围。`
+    : count ? `找到 ${count} 位用户，可选择其余额与限购视角。` : '没有匹配用户，可继续使用模拟视角。';
 }
 
 // ---------------------------------------------------------------- 用户积分
@@ -838,11 +970,16 @@ function openAdjust(user) {
   $('a-absolute').value = '';
   $('a-note').value = '';
   clearErrors(['a-delta', 'a-absolute']);
-  $('adjust-modal').hidden = false;
-  $('a-delta').focus();
+  showModal('adjust-modal', $('a-delta'));
+}
+
+function closeAdjust() {
+  if ($('adjust-modal').querySelector('.is-busy')) return;
+  hideModal('adjust-modal');
 }
 
 async function saveAdjust() {
+  $('adjust-modal-status').hidden = true;
   clearErrors(['a-delta', 'a-absolute']);
   const absolute = readInteger('a-absolute', { allowEmpty: true, min: 0 });
   const delta = readInteger('a-delta', { allowEmpty: true, min: -1000000 });
@@ -861,7 +998,7 @@ async function saveAdjust() {
   };
   if (absolute.value !== null) payload.absolute = absolute.value;
   const result = await post('shop/users/adjust', payload);
-  $('adjust-modal').hidden = true;
+  hideModal('adjust-modal');
   await loadUsers();
   await loadSummary();
   say(result.message || '积分已调整', 'ok');
@@ -897,7 +1034,7 @@ async function loadRedemptions(page) {
     const stamp = new Date(Number(record.created_at) * 1000);
     cells[0].textContent = Number.isNaN(stamp.getTime())
       ? '-'
-      : stamp.toLocaleString('zh-CN', { hour12: false });
+      : stamp.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
     setClipText(cells[1], record.nickname || record.user_id || record.user_key);
     setClipText(cells[2], record.product_name);
     cells[3].textContent = `-${record.cost}`;
@@ -909,7 +1046,7 @@ async function loadRedemptions(page) {
 
     const actions = document.createElement('div');
     actions.className = 'row-actions';
-    if (record.status !== '已发放') {
+    if (record.status === '待发放') {
       const done = document.createElement('button');
       done.className = 'btn-link';
       done.type = 'button';
@@ -1064,7 +1201,7 @@ async function loadLedger(page) {
     const stamp = new Date(Number(entry.created_at) * 1000);
     cells[0].textContent = Number.isNaN(stamp.getTime())
       ? '-'
-      : stamp.toLocaleString('zh-CN', { hour12: false });
+      : stamp.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
     setClipText(cells[1], entry.nickname || entry.user_id || entry.user_key);
     const tag = document.createElement('span');
     const tone = LEDGER_TAG[entry.type] || '';
@@ -1113,12 +1250,43 @@ async function exportLedger() {
 // ---------------------------------------------------------------- 初始化
 
 function bindTabs() {
-  document.querySelectorAll('.tab').forEach((tab) => {
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  const panels = Array.from(document.querySelectorAll('.panel'));
+  const compact = window.matchMedia('(max-width: 900px)');
+  const syncOrientation = () => document.querySelector('.tabs').setAttribute('aria-orientation', compact.matches ? 'horizontal' : 'vertical');
+  syncOrientation();
+  compact.addEventListener('change', syncOrientation);
+  tabs.forEach((tab, index) => {
+    const name = tab.dataset.tab;
+    const panel = document.querySelector(`.panel[data-panel="${name}"]`);
+    tab.id = `tab-${name}`;
+    tab.setAttribute('aria-controls', `panel-${name}`);
+    tab.setAttribute('aria-selected', String(tab.classList.contains('active')));
+    tab.tabIndex = tab.classList.contains('active') ? 0 : -1;
+    if (panel) {
+      panel.id = `panel-${name}`;
+      panel.setAttribute('role', 'tabpanel');
+      panel.setAttribute('aria-labelledby', tab.id);
+    }
+    tab.addEventListener('keydown', (event) => {
+      let next;
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % tabs.length;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index + tabs.length - 1) % tabs.length;
+      if (event.key === 'Home') next = 0;
+      if (event.key === 'End') next = tabs.length - 1;
+      if (next === undefined) return;
+      event.preventDefault();
+      tabs.forEach((item, itemIndex) => { item.tabIndex = itemIndex === next ? 0 : -1; });
+      tabs[next].focus();
+    });
     tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach((item) => item.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach((item) => item.classList.remove('active'));
+      tabs.forEach((item) => {
+        item.classList.remove('active');
+        item.setAttribute('aria-selected', String(item === tab));
+        item.tabIndex = item === tab ? 0 : -1;
+      });
+      panels.forEach((item) => item.classList.remove('active'));
       tab.classList.add('active');
-      const panel = document.querySelector(`.panel[data-panel="${tab.dataset.tab}"]`);
       if (panel) panel.classList.add('active');
       if (tab.dataset.tab === 'users') run(null, () => loadUsers(1));
       if (tab.dataset.tab === 'redemptions') run(null, () => loadRedemptions(1));
@@ -1133,11 +1301,13 @@ async function boot() {
     document.title = bridge.t('pages.shop.title', '打卡积分商店');
   }
   applyTheme(context ? context.isDark : undefined);
+  const logo = $('brand-logo');
+  logo.addEventListener('error', () => { logo.hidden = true; });
+  if (logo.complete && !logo.naturalWidth) logo.hidden = true;
   bindTabs();
+  bindModalFocus();
   bindModalDismiss('product-modal', closeProduct);
-  bindModalDismiss('adjust-modal', () => {
-    $('adjust-modal').hidden = true;
-  });
+  bindModalDismiss('adjust-modal', closeAdjust);
   $('status-close').addEventListener('click', () => say(''));
   $('refresh').addEventListener('click', (event) => {
     run(event.currentTarget, async () => {
@@ -1195,6 +1365,18 @@ async function boot() {
   $('preview-shop').addEventListener('click', (event) => {
     run(event.currentTarget, previewShop, '导出中');
   });
+  $('preview-user-search').addEventListener('click', (event) => {
+    run(event.currentTarget, searchPreviewUsers, '搜索中');
+  });
+  $('preview-user-keyword').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      run($('preview-user-search'), searchPreviewUsers, '搜索中');
+    }
+  });
+  $('preview-user').addEventListener('change', () => {
+    state.previewUserKey = $('preview-user').value || 'preview:0';
+  });
   $('user-search').addEventListener('click', (event) => {
     run(event.currentTarget, () => loadUsers(1), '搜索中');
   });
@@ -1209,9 +1391,7 @@ async function boot() {
   $('a-save').addEventListener('click', (event) => {
     run(event.currentTarget, saveAdjust, '提交中');
   });
-  $('a-cancel').addEventListener('click', () => {
-    $('adjust-modal').hidden = true;
-  });
+  $('a-cancel').addEventListener('click', closeAdjust);
   $('redeem-search').addEventListener('click', (event) => {
     run(event.currentTarget, () => loadRedemptions(1), '筛选中');
   });
