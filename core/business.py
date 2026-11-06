@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import csv
 import io
+import json
 import random
 import re
 import time
@@ -14,7 +15,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable
 
 try:  # 作为包被导入（测试 / AstrBot 包加载）
-    from . import emailer
+    from . import emailer, items
     from .store import Store
     from .timeutil import (
         PLUGIN_TIMEZONE,
@@ -26,6 +27,7 @@ try:  # 作为包被导入（测试 / AstrBot 包加载）
     )
 except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 core/
     import emailer  # type: ignore[no-redef]
+    import items  # type: ignore[no-redef]
     from store import Store  # type: ignore[no-redef]
     from timeutil import (  # type: ignore[no-redef]
         PLUGIN_TIMEZONE,
@@ -57,7 +59,9 @@ LEDGER_CHECKIN = "打卡"
 LEDGER_REDEEM = "兑换"
 LEDGER_REFUND = "返还"
 LEDGER_ADJUST = "调整"
-LEDGER_TYPES = (LEDGER_CHECKIN, LEDGER_REDEEM, LEDGER_REFUND, LEDGER_ADJUST)
+LEDGER_TYPES = (LEDGER_CHECKIN, LEDGER_REDEEM, LEDGER_REFUND, LEDGER_ADJUST,
+                "股票买入", "股票卖出", "积分通存入", "积分通取出", "存款利息",
+                "竞猜下注", "竞猜返还", "竞猜派彩", "刮奖购买", "刮奖奖金", "道具返利")
 # 流水条数上限：只保留最近这些条，避免 shop.json 无限增长
 # （单条约 200 字节，1000 条约 200KB，落盘仍然是"整份 JSON 重写"的原子写）。
 LEDGER_LIMIT = 1000
@@ -165,6 +169,9 @@ class Product:
     sort_order: int = 0
     created_at: float = 0.0
     redeemed: int = 0
+    product_type: str = "normal"
+    per_user_daily_limit: int | None = None
+    effect_config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Product":
@@ -182,6 +189,9 @@ class Product:
             sort_order=_as_int(raw.get("sort_order")),
             created_at=_as_float(raw.get("created_at")),
             redeemed=max(0, _as_int(raw.get("redeemed"))),
+            product_type=str(raw.get("product_type") or "normal"),
+            per_user_daily_limit=_as_optional_int(raw.get("per_user_daily_limit")),
+            effect_config=copy.deepcopy(raw.get("effect_config") or items.DEFAULT_EFFECTS.get(raw.get("product_type", "normal"), {})),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -199,6 +209,9 @@ class Product:
             "sort_order": self.sort_order,
             "created_at": self.created_at,
             "redeemed": self.redeemed,
+            "product_type": self.product_type,
+            "per_user_daily_limit": self.per_user_daily_limit,
+            "effect_config": copy.deepcopy(self.effect_config),
         }
 
 
@@ -248,6 +261,8 @@ class CheckinOutcome:
     total: int = 0
     date: str = ""
     bonus: int = 0
+    base: int = 0
+    card_bonus: int = 0
 
 
 @dataclass
@@ -262,6 +277,10 @@ class PendingConfirm:
     cost: int
     created_at: float
     expires_at: float
+    product_fingerprint: str = ""
+    action: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+    quote: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -363,7 +382,7 @@ def numbered_products(
     return [(number, product) for number, product in pairs if product.enabled]
 
 
-def product_state(data: dict[str, Any], product: Product, user_key: str) -> ProductState:
+def product_state(data: dict[str, Any], product: Product, user_key: str, now: float | None = None) -> ProductState:
     """计算某个商品对某个用户是否可兑换。"""
     user = data.get("users", {}).get(user_key) or {}
     points = _as_int(user.get("points"))
@@ -391,6 +410,8 @@ def product_state(data: dict[str, Any], product: Product, user_key: str) -> Prod
         reason = REASON_LIMIT
     elif not affordable:
         reason = REASON_POINTS
+    if not reason:
+        reason = items.eligibility(data, product, user_key, time.time() if now is None else now)
     return ProductState(
         product=product,
         affordable=affordable,
@@ -544,6 +565,11 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
             ),
             (cmd("我的积分"), f"查看积分、连签天数与最近记录（别名 {cmd('积分')}）"),
             (cmd("积分榜"), f"查看本平台积分排行（别名 {cmd('排行榜')}）"),
+            (cmd("股市"), "查看虚构行情、持仓；买入/卖出 股票代码 股数"),
+            (cmd("积分通"), "查看活期账户；存入/取出 积分数"),
+            (cmd("竞猜"), "查看题目；下注 题号 选项 积分数"),
+            (cmd("刮刮乐"), "查看奖表；购买一张，引用确认后开奖"),
+            (cmd("我的道具"), "查看签到增益有效期与余额返利卡冷却"),
             (
                 cmd("绑定邮箱 邮箱"),
                 "绑定收件邮箱（发放邮件用）；不带参数查看，填「解绑」清除",
@@ -745,7 +771,9 @@ def perform_checkin(
 
     streak = _as_int(user.get("streak")) + 1 if last and last == previous_day(today) else 1
     base, bonus = calculate_checkin_points(rewards, streak, rng)
-    gained = base + bonus
+    card_bonus = items.checkin_extra(data, user_key, base, now)
+    gained = base + bonus + card_bonus
+    items.integer(_as_int(user.get("points")) + gained, "签到后余额")
     user["points"] = _as_int(user.get("points")) + gained
     user["total_earned"] = _as_int(user.get("total_earned")) + gained
     user["checkin_count"] = _as_int(user.get("checkin_count")) + 1
@@ -762,6 +790,7 @@ def perform_checkin(
             "points": gained,
             "base": base,
             "bonus": bonus,
+            "card_bonus": card_bonus,
             "streak": streak,
             "time": now,
         }
@@ -774,7 +803,7 @@ def perform_checkin(
         LEDGER_CHECKIN,
         gained,
         now,
-        note=f"连签 {streak} 天" + (f"（基础 {base} + 奖励 {bonus}）" if bonus else ""),
+        note=f"连签 {streak} 天（基础 {base} + 连签 {bonus} + 道具 {card_bonus}）",
         ref=today,
     )
     return CheckinOutcome(
@@ -785,6 +814,8 @@ def perform_checkin(
         total=_as_int(user.get("points")),
         date=today,
         bonus=bonus,
+        base=base,
+        card_bonus=card_bonus,
     )
 
 
@@ -798,8 +829,20 @@ def build_pending(
     """为一次兑换生成待确认请求。"""
     settings = data.get("settings", {})
     timeout = max(10, _as_int(settings.get("confirm_timeout_seconds"), 60))
+    wallet = int(data.get("users", {}).get(user_key, {}).get("points", 0))
+    rule = items.description(product, wallet)
+    usage = data.get("economy", {}).get("daily_usage", {}).get(user_key, {})
+    if usage.get("date") != items.today(data, now):
+        usage = {}
+    if product.per_user_daily_limit is not None:
+        remaining = max(0, product.per_user_daily_limit - usage.get("products", {}).get(product.id, 0))
+        rule += f" 今日此商品剩余 {remaining} 次。"
+    if product.product_type != "normal":
+        family = "checkin_card_daily_limit" if product.product_type == "checkin_boost" else "rebate_card_daily_limit"
+        remaining = max(0, data.get("economy", {}).get("settings", {}).get(family, 1) - usage.get("families", {}).get(product.product_type, 0))
+        rule += f" 今日同类道具剩余 {remaining} 次；自动发放后不支持普通退款。"
     return PendingConfirm(
-        token="SHOP-" + uuid.uuid4().hex[:6].upper(),
+        token="SHOP-" + uuid.uuid4().hex[:16].upper(),
         session_key=session_key,
         user_key=user_key,
         product_id=product.id,
@@ -807,6 +850,8 @@ def build_pending(
         cost=product.cost,
         created_at=now,
         expires_at=now + timeout,
+        product_fingerprint=items.fingerprint(data, product),
+        quote={"text": rule.strip(), "wallet": wallet},
     )
 
 
@@ -815,6 +860,8 @@ def prompt_text(pending: PendingConfirm, timeout_seconds: int) -> str:
     return (
         f"是否确认兑换「{pending.product_name}」商品？\n"
         f"需要 {pending.cost} 积分。\n"
+        + (str(pending.quote.get("text", "")) + "\n" if pending.quote.get("text") else "")
+        +
         f"请引用本条消息回复 是/否（{int(timeout_seconds)} 秒内有效，编号 {pending.token}）"
     )
 
@@ -990,6 +1037,13 @@ def perform_redemption(
     Returns:
         ``(是否成功, 提示文案, 扣分后的余额, 记录 ID)``。
     """
+    from . import economy
+    receipt_key = "redeem:" + pending.token
+    previous_receipt = data.get("economy", {}).get("operations", {}).get(receipt_key)
+    if previous_receipt:
+        if previous_receipt.get("user_key") != pending.user_key:
+            return False, "确认编号不属于当前用户", 0, ""
+        return tuple(previous_receipt["redemption_result"])
     user = _ensure_user(data, pending.user_key)
     product_raw = next(
         (item for item in data.get("products", []) if item.get("id") == pending.product_id),
@@ -1009,11 +1063,17 @@ def perform_redemption(
             _as_int(user.get("points")),
             "",
         )
+    if pending.product_fingerprint and pending.product_fingerprint != items.fingerprint(data, product):
+        return False, "商品效果或限购规则已变更，请重新发起兑换确认", _as_int(user.get("points")), ""
+    if product.product_type == "balance_rebate" and pending.quote.get("wallet") != _as_int(user.get("points")):
+        return False, "可用余额已变更，请重新确认本次返利金额", _as_int(user.get("points")), ""
     if product.stock is not None and product.stock <= 0:
         return False, f"「{product.name}」库存不足，本次兑换已取消", _as_int(user.get("points")), ""
-    state = product_state(data, product, pending.user_key)
+    state = product_state(data, product, pending.user_key, now)
     if state.remaining_quota is not None and state.remaining_quota <= 0:
         return False, f"「{product.name}」已达限购数量，本次兑换已取消", _as_int(user.get("points")), ""
+    if state.reason not in ("", REASON_POINTS):
+        return False, state.reason, _as_int(user.get("points")), ""
     points = _as_int(user.get("points"))
     if points < product.cost:
         return (
@@ -1031,6 +1091,9 @@ def perform_redemption(
     product_raw["redeemed"] = _as_int(product_raw.get("redeemed")) + 1
 
     record_id = "r_" + uuid.uuid4().hex[:10]
+    append_ledger(data, pending.user_key, LEDGER_REDEEM, -product.cost, now,
+                  note=f"兑换「{product.name}」", ref=record_id)
+    effect_message = items.apply_purchase(data, product, pending.user_key, now, record_id, points)
     data.setdefault("redemptions", []).append(
         {
             "id": record_id,
@@ -1040,30 +1103,26 @@ def perform_redemption(
             "product_id": product.id,
             "product_name": product.name,
             "cost": product.cost,
-            "status": "待发放",
+            "status": "待发放" if product.product_type == "normal" else "已发放",
+            "product_type": product.product_type,
+            "effect_config": copy.deepcopy(product.effect_config),
+            "auto_fulfilled": product.product_type != "normal",
             "refunded": False,
             # 记下发起兑换的会话，发放时才能主动通知本人
             "session": pending.session_key,
             "created_at": now,
             "updated_at": now,
-            "note": "",
+            "note": effect_message,
         }
     )
     message = (
         f"兑换成功：{product.name}\n"
         f"消耗 {product.cost} 积分，当前余额 {user['points']} 积分\n"
-        "管理员会在后台标记发放状态。"
+        + ("管理员会在后台标记发放状态。" if product.product_type == "normal" else effect_message)
     )
-    append_ledger(
-        data,
-        pending.user_key,
-        LEDGER_REDEEM,
-        -product.cost,
-        now,
-        note=f"兑换「{product.name}」",
-        ref=record_id,
-    )
-    return True, message, _as_int(user["points"]), record_id
+    result = (True, message, _as_int(user["points"]), record_id)
+    economy.ensure(data)["operations"][receipt_key] = {"user_key": pending.user_key, "created_at": now, "redemption_result": list(result)}
+    return result
 
 
 def leaderboard(
@@ -1139,6 +1198,12 @@ def append_ledger(
         "note": str(note or ""),
         "ref": str(ref or ""),
         "created_at": now,
+        "source": ("股市" if str(kind).startswith("股票") else "积分通" if str(kind).startswith(("积分通", "存款"))
+                   else "竞猜" if str(kind).startswith("竞猜") else "刮刮乐" if str(kind).startswith("刮奖")
+                   else "道具" if str(kind).startswith("道具") else "打卡" if kind == LEDGER_CHECKIN
+                   else "管理调整" if kind == LEDGER_ADJUST else "商店"),
+        "fee": 0,
+        "profit": _as_int(points) if kind in (LEDGER_CHECKIN, "道具返利") else 0,
     }
     ledger = data.setdefault("ledger", [])
     if not isinstance(ledger, list):
@@ -1276,7 +1341,7 @@ def list_ledger(
     }
 
 
-LEDGER_CSV_HEADER = ("时间", "用户", "平台", "用户ID", "类型", "积分变动", "变动后余额", "备注", "关联单号")
+LEDGER_CSV_HEADER = ("时间", "用户", "平台", "用户ID", "类型", "积分变动", "变动后余额", "备注", "关联单号", "玩法来源", "费用", "收益")
 
 
 def ledger_csv(data: dict[str, Any], keyword: str = "", kind: str = "", start: Any = None, end: Any = None) -> str:
@@ -1298,6 +1363,9 @@ def ledger_csv(data: dict[str, Any], keyword: str = "", kind: str = "", start: A
                 str(_as_int(entry.get("balance"))),
                 str(entry.get("note") or ""),
                 str(entry.get("ref") or ""),
+                str(entry.get("source") or entry.get("type") or ""),
+                str(_as_int(entry.get("fee"))),
+                str(_as_int(entry.get("profit"))),
             ]
         )
     return "\ufeff" + buffer.getvalue()
@@ -1331,15 +1399,23 @@ def normalize_product(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
         return {}, "商品名称不能为空"
     if len(name) > 40:
         return {}, "商品名称不能超过 40 个字符"
-    cost = _as_int(payload.get("cost"), -1)
-    if cost < 0:
-        return {}, "商品价格必须是非负整数"
+    try:
+        cost = items.integer(payload.get("cost", 0), "商品价格")
+        extra = items.normalize(payload)
+    except ValueError as exc:
+        return {}, str(exc)
     stock_raw = payload.get("stock")
-    if stock_raw not in (None, "") and _as_int(stock_raw, -1) < 0:
-        return {}, "库存必须是非负整数或留空表示不限量"
+    if stock_raw not in (None, ""):
+        try:
+            items.integer(stock_raw, "库存")
+        except ValueError as exc:
+            return {}, str(exc)
     limit_raw = payload.get("per_user_limit")
-    if limit_raw not in (None, "") and _as_int(limit_raw, -1) < 0:
-        return {}, "限购数量必须是非负整数或留空表示不限购"
+    if limit_raw not in (None, ""):
+        try:
+            items.integer(limit_raw, "限购数量")
+        except ValueError as exc:
+            return {}, str(exc)
     stock = _as_optional_int(stock_raw)
     limit = _as_optional_int(limit_raw)
     return (
@@ -1353,6 +1429,7 @@ def normalize_product(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
             "enabled": bool(payload.get("enabled", True)),
             "sort_order": _as_int(payload.get("sort_order")),
             "image_path": str(payload.get("image_path") or "").strip(),
+            **extra,
         },
         "",
     )
@@ -1561,6 +1638,8 @@ def transition_redemption(
     )
     if record is None:
         return False, "兑换记录不存在", None
+    if record.get("auto_fulfilled"):
+        return False, "该道具已自动发放或返利，不能取消退款或重新发放", None
     previous = str(record.get("status") or "")
     refunded = bool(record.get("refunded")) or "（积分已返还）" in str(record.get("note") or "")
     if not refunded:

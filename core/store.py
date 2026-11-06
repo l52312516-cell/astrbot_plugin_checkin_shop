@@ -16,6 +16,7 @@ import asyncio
 import copy
 import json
 import os
+import shutil
 import time
 from typing import Any, Callable
 
@@ -24,7 +25,11 @@ from typing import Any, Callable
 from astrbot.api import logger
 
 STORE_FILE_NAME = "shop.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+class UnsupportedSchemaError(ValueError):
+    """无法安全读取的数据版本；禁止把它当作损坏文件重建。"""
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "points_scope": "platform_user",
@@ -54,6 +59,7 @@ DEFAULT_REWARDS: dict[str, Any] = {
 
 def default_data() -> dict[str, Any]:
     """返回一份全新的默认数据。"""
+    from .economy import default_economy
     return {
         "version": SCHEMA_VERSION,
         "settings": copy.deepcopy(DEFAULT_SETTINGS),
@@ -65,6 +71,7 @@ def default_data() -> dict[str, Any]:
         "ledger": [],
         # 上一次把插件配置页同步进运行数据时的配置值（见 main.py 的 _effective）
         "config_snapshot": {},
+        "economy": default_economy(),
     }
 
 
@@ -87,6 +94,11 @@ def migrate(data: Any) -> dict[str, Any]:
     """
     if not isinstance(data, dict):
         raise ValueError("存储根节点必须是 JSON 对象")
+    version = data.get("version", 1)
+    if type(version) is not int or version > SCHEMA_VERSION or version < 1:
+        raise UnsupportedSchemaError("数据版本不受支持，请使用匹配版本的插件；原文件未修改")
+    if "economy" in data and not isinstance(data["economy"], dict):
+        raise UnsupportedSchemaError("经济数据格式异常，禁止重建以免丢失资产")
     fresh = default_data()
     result: dict[str, Any] = {}
     result["version"] = SCHEMA_VERSION
@@ -110,6 +122,12 @@ def migrate(data: Any) -> dict[str, Any]:
     result["ledger"] = [dict(item) for item in ledger if isinstance(item, dict)] if isinstance(ledger, list) else []
     snapshot = data.get("config_snapshot")
     result["config_snapshot"] = dict(snapshot) if isinstance(snapshot, dict) else {}
+    result["economy"] = copy.deepcopy(data.get("economy", fresh["economy"]))
+    from .economy import ensure, EconomyError
+    try:
+        ensure(result)
+    except EconomyError as exc:
+        raise UnsupportedSchemaError(str(exc) + "；原文件未修改") from exc
     for user in result["users"].values():
         _merge_defaults(
             user,
@@ -144,6 +162,9 @@ def migrate(data: Any) -> dict[str, Any]:
                 "sort_order": 0,
                 "created_at": 0.0,
                 "redeemed": 0,
+                "product_type": "normal",
+                "per_user_daily_limit": None,
+                "effect_config": {},
             },
         )
     # 只有默认数据才算真正的新库；显式返回，避免调用方误判。
@@ -205,8 +226,8 @@ class Store:
         if os.path.exists(self.path):
             try:
                 with open(self.path, "r", encoding="utf-8") as handle:
-                    data = migrate(json.load(handle))
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    original = json.load(handle)
+            except (OSError, json.JSONDecodeError) as exc:
                 backup = f"{self.path}.corrupt.{int(time.time())}"
                 try:
                     os.replace(self.path, backup)
@@ -218,6 +239,14 @@ class Store:
                     backup,
                 )
                 data = None
+            else:
+                # 合法 JSON 的迁移、备份和升级写入失败必须终止，不能重建钱包。
+                data = migrate(original)
+                if original.get("version", 1) < SCHEMA_VERSION:
+                    backup = f"{self.path}.v1.backup.{time.time_ns()}.json"
+                    shutil.copy2(self.path, backup)
+                    self._write(data)
+                    logger.info("[打卡商店] 数据升级完成，原文件备份：%s", backup)
         if data is None:
             data = migrate(seed or {})
             logger.info("[打卡商店] 初始化数据文件 %s", self.path)
@@ -274,6 +303,8 @@ class Store:
 
         Raises:
             Exception: 原样抛出 ``handler`` 的异常。
+            asyncio.CancelledError: 写盘开始后会先等待提交结束再抛出取消；
+                已成功的提交仍会更新内存，重试须使用业务回执判断结果。
         """
         async with self._get_lock():
             # 这里必须用不再取锁的 _open_locked：asyncio.Lock 不可重入，
@@ -284,8 +315,27 @@ class Store:
             self._warn_if_externally_changed()
             # 整库 JSON 序列化 + fsync 是同步阻塞操作（库越大越慢），在事件循环里会
             # 拖住同进程的其它会话；丢到线程里，写锁仍然只由本协程持有。
-            await asyncio.to_thread(self._write, snapshot)
+            write_task = asyncio.create_task(asyncio.to_thread(self._write, snapshot))
+            cancelled = False
+            try:
+                while True:
+                    try:
+                        # 取消等待者不能取消仍在执行的写盘线程；锁要持有到真正提交结束。
+                        await asyncio.shield(write_task)
+                        break
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        if write_task.cancelled():
+                            raise
+            except Exception:
+                if cancelled:
+                    # 停用仍须退出；写入错误保留日志，内存继续使用上一个完整快照。
+                    logger.exception("[打卡商店] 取消请求期间保存失败，未更新内存快照")
+                    raise asyncio.CancelledError from None
+                raise
             self._data = snapshot
+            if cancelled:
+                raise asyncio.CancelledError
             return result
 
     def _warn_if_externally_changed(self) -> None:

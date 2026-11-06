@@ -15,9 +15,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 import os
 import re
 import time
+import uuid
+from dataclasses import asdict
 from functools import partial
 from typing import Any
 
@@ -45,14 +49,14 @@ except ImportError:  # pragma: no cover - 极老版本没有该模块
     session_waiter = None  # type: ignore[assignment]
 
 try:  # 插件以包的方式加载
-    from .core import business, dashboard_api, emailer, render
+    from .core import business, dashboard_api, emailer, render, economy, economy_chat, items
     from .core.store import Store, default_data
 except ImportError:  # AstrBot 把 main.py 当顶层模块加载
-    from core import business, dashboard_api, emailer, render  # type: ignore[no-redef]
+    from core import business, dashboard_api, emailer, render, economy, economy_chat, items  # type: ignore[no-redef]
     from core.store import Store, default_data  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.4.0"
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)")
@@ -111,7 +115,7 @@ PRIVATE_SESSION_TYPES = {"aiocqhttp": "FriendMessage"}
 # 正则过滤器不受 wake_prefix 制约，所以这里能兜住它并回一句用法说明。
 BARE_COMMAND_RE = re.compile(
     r"^[\s]*(打卡|签到|商店|我的积分|积分|积分榜|排行榜|商店帮助|打卡帮助"
-    r"|兑换商品|兑换|绑定邮箱|我的邮箱)[\s]*[!！。.、~～,，?？]*$"
+    r"|兑换商品|兑换|绑定邮箱|我的邮箱|股市|积分通|竞猜|刮刮乐|我的道具)[\s]*[!！。.、~～,，?？]*$"
 )
 
 
@@ -147,6 +151,8 @@ class CheckinShopPlugin(Star):
         self._bot_ids: dict[str, str] = {}
         self._api = dashboard_api.DashboardAPI(self)
         self._registered = False
+        self._confirming_tokens: set[str] = set()
+        self._economy_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ 基础
 
@@ -595,13 +601,17 @@ class CheckinShopPlugin(Star):
         try:
             adopted: dict[str, Any] = {}
             await self.store.mutate(
-                lambda data: self._apply_config(data, adopted), self._seed()
+                lambda data: self._initialize_data(data, adopted), self._seed()
             )
             if adopted:
                 # 运行数据比配置页新（升级场景）：回写配置页，保持两边一致
                 self.write_config(adopted)
         except Exception:
             logger.exception("[打卡商店] 数据加载失败")
+            raise
+        self._restore_pendings()
+        if self._economy_task is None or self._economy_task.done():
+            self._economy_task = asyncio.create_task(self._economy_loop())
         if not self._registered:
             self._api.register()
             self._registered = True
@@ -613,11 +623,141 @@ class CheckinShopPlugin(Star):
 
     async def terminate(self) -> None:
         """插件停用：落盘并释放资源。"""
+        if self._economy_task is not None:
+            self._economy_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._economy_task
+            self._economy_task = None
         try:
             await self.store.flush()
         except Exception:
             logger.exception("[打卡商店] 停用时保存数据失败")
         self._pendings.clear()
+
+    def _initialize_data(self, data: dict, adopted: dict) -> dict:
+        self._apply_config(data, adopted)
+        economy.settle_due(data, time.time())
+        return data
+
+    @staticmethod
+    def _economy_active(data: dict) -> bool:
+        econ = data.get("economy", {})
+        return (any(value is True for key, value in econ.get("settings", {}).items() if key.endswith("_enabled"))
+                or any(row.get("principal", 0) for row in econ.get("savings", {}).values())
+                or any(any(p.get("quantity", 0) for p in rows.values()) for rows in econ.get("positions", {}).values())
+                or any(row.get("status") not in economy.TERMINAL for row in econ.get("predictions", {}).values()))
+
+    async def _economy_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if self._economy_active(self.store.snapshot()):
+                    await self.store.mutate(lambda data: economy.settle_due(data, time.time()), self._seed())
+            except Exception:
+                logger.exception("[打卡商店] 玩法到期结算失败，将在下一分钟重试")
+
+    def _restore_pendings(self) -> None:
+        now = time.time()
+        rows = self.store.snapshot().get("economy", {}).get("pending_confirmations", {})
+        for token, row in rows.items() if isinstance(rows, dict) else ():
+            try:
+                pending = business.PendingConfirm(**row)
+                if pending.token == token and pending.expires_at > now:
+                    self._pendings[token] = pending
+            except (TypeError, ValueError):
+                logger.warning("[打卡商店] 已忽略格式无效的待确认请求")
+        self._prune_pendings()
+
+    @staticmethod
+    def _save_pending(data: dict, pending: business.PendingConfirm) -> None:
+        rows = economy.ensure(data).setdefault("pending_confirmations", {})
+        for token, row in list(rows.items()):
+            if not isinstance(row, dict) or row.get("expires_at", 0) <= pending.created_at:
+                rows.pop(token, None)
+        rows[pending.token] = asdict(pending)
+
+    async def _settled_data(self) -> dict:
+        if self._economy_active(self.store.snapshot()):
+            await self.store.mutate(lambda data: economy.settle_due(data, time.time()), self._seed())
+        return await self.store.data(self._seed())
+
+    async def _economy_command(self, event: AstrMessageEvent, section: str, text: str):
+        user_key = self._user_key(event)
+        now = time.time()
+        try:
+            parsed = economy_chat.parse(section, str(text or ""))
+            if parsed is not None:
+                action, params = parsed
+                def prepare(data: dict):
+                    economy.settle_due(data, now)
+                    quote = economy.prepare_action(data, user_key, action, params, now)
+                    timeout = max(10, int(data.get("settings", {}).get("confirm_timeout_seconds", 60)))
+                    pending = business.PendingConfirm(
+                        token="SHOP-" + uuid.uuid4().hex[:16].upper(), session_key=self._session_key(event),
+                        user_key=user_key, product_id="", product_name=section, cost=0,
+                        created_at=now, expires_at=now + timeout, action=action,
+                        params=quote["params"], quote=quote)
+                    self._save_pending(data, pending)
+                    usage = economy.daily(data, user_key, now)
+                    settings = economy.ensure(data)["settings"]
+                    remainder = ""
+                    if action.startswith("stock_"):
+                        remainder = f"今日剩余成交 {max(0, settings['stock_daily_trades']-usage['stock_trades'])} 笔；剩余买入额度 {max(0, settings['stock_daily_buy_limit']-usage['stock_buy_total'])} 分（含费）。"
+                    elif action == "prediction_bet":
+                        remainder = f"今日剩余竞猜投入 {max(0, settings['prediction_daily_limit']-usage['prediction_stake'])} 分；显示回报为预计值。"
+                        prediction = data['economy']['predictions'][params['prediction_id']]
+                        stake = params['amount']
+                        same = sum(b['amount'] for b in prediction['bets'].values() if b['option'] == params['option']) + stake
+                        estimate = ((prediction['total_stake']+stake)*prediction['payout_bps']//10000)*stake//same
+                        remainder += f"按当前奖池，押中预计返还约 {estimate} 分，后续下注会改变金额。"
+                    elif action == "lottery_buy":
+                        remainder = f"今日剩余 {max(0, settings['lottery_daily_limit']-usage['lottery_count'])} 张；开奖后不支持普通退款。"
+                    return pending, quote["text"] + "\n" + remainder, timeout
+                pending, prompt, timeout = await self.store.mutate(prepare, self._seed())
+                self._prune_pendings()
+                self._pendings[pending.token] = pending
+                yield event.plain_result(f"是否确认本次操作？\n{prompt}\n请引用本条消息回复 是/否（{timeout} 秒内有效，编号 {pending.token}）")
+                return
+            def view(data: dict):
+                info = economy.overview(data, now)
+                assets = economy.user_assets(data, user_key, now)
+                assets['business_date'] = items.today(data, now)
+                return economy_chat.display(section, str(text or ""), info, assets, business.display_prefix(data.get("settings")))
+            message = await self.store.mutate(view, self._seed())
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
+        except Exception:
+            logger.exception("[打卡商店] 玩法请求失败")
+            yield event.plain_result("操作未完成，请稍后重试；积分没有扣除。")
+            return
+        async for result in self._send(event, message, partial(render.render_economy, section, message, self.store.render_dir, self._palette())):
+            yield result
+
+    @filter.command("股市")
+    async def cmd_stocks(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+        async for result in self._economy_command(event, "股市", 参数):
+            yield result
+
+    @filter.command("积分通")
+    async def cmd_savings(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+        async for result in self._economy_command(event, "积分通", 参数):
+            yield result
+
+    @filter.command("竞猜")
+    async def cmd_predictions(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+        async for result in self._economy_command(event, "竞猜", 参数):
+            yield result
+
+    @filter.command("刮刮乐")
+    async def cmd_lottery(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+        async for result in self._economy_command(event, "刮刮乐", 参数):
+            yield result
+
+    @filter.command("我的道具")
+    async def cmd_items(self, event: AstrMessageEvent):
+        async for result in self._economy_command(event, "我的道具", ""):
+            yield result
 
     # ------------------------------------------------------------------ 指令
 
@@ -628,10 +768,12 @@ class CheckinShopPlugin(Star):
         now = time.time()
         # 顺手把插件配置页的规则同步进快照，配置页改完即使没热重载也立刻生效
         try:
+            def checkin(data: dict):
+                self._apply_config(data)
+                economy.settle_due(data, now)
+                return business.perform_checkin(data, user_key, self._sender_name(event), now)
             outcome = await self.store.mutate(
-                lambda data: business.perform_checkin(
-                    self._apply_config(data), user_key, self._sender_name(event), now
-                ),
+                checkin,
                 self._seed(),
             )
         except Exception as exc:
@@ -651,6 +793,7 @@ class CheckinShopPlugin(Star):
         bonus_line = f"（含连签奖励 {outcome.bonus}）" if outcome.bonus else ""
         text = (
             f"打卡成功！本次获得 {outcome.points} 积分{bonus_line}\n"
+            f"基础 {outcome.base} · 连签奖励 {outcome.bonus} · 卡片加成 {outcome.card_bonus}\n"
             f"连签 {outcome.streak} 天 · 当前积分 {outcome.total}\n"
             f"发送 {self._display_prefix()}商店 看看能换点什么吧～"
         )
@@ -769,7 +912,7 @@ class CheckinShopPlugin(Star):
     async def cmd_shop(self, event: AstrMessageEvent):
         """商店：渲染可兑换 / 不可兑换商品图片。"""
         user_key = self._user_key(event)
-        data = await self.store.data(self._seed())
+        data = await self._settled_data()
         view = business.build_shop_view(data, user_key)
         if not view.items:
             yield event.plain_result(
@@ -851,7 +994,7 @@ class CheckinShopPlugin(Star):
         """我的积分：个人积分卡片。"""
         user_key = self._user_key(event)
         name = self._sender_name(event)
-        data = await self.store.data(self._seed())
+        data = await self._settled_data()
         user = (data.get("users") or {}).get(user_key) or {}
         prefix = business.display_prefix(data.get("settings"))
         text = (
@@ -860,6 +1003,9 @@ class CheckinShopPlugin(Star):
             f"累计打卡 {int(user.get('checkin_count') or 0)} 次\n"
             f"发送 {prefix}打卡 赚积分，{prefix}商店 查看商品"
         )
+        account = data.get("economy", {}).get("savings", {}).get(user_key, {})
+        if account.get("principal"):
+            text += f"\n积分通本金 {account['principal']} 分（独立于可用积分）"
         card = await self._points_card(user_key, name)
         async for result in self._send(event, text, card):
             yield result
@@ -871,7 +1017,7 @@ class CheckinShopPlugin(Star):
             platform = str(event.get_platform_name() or "")
         except Exception:
             platform = ""
-        data = await self.store.data(self._seed())
+        data = await self._settled_data()
         settings = data.get("settings") or {}
         rows = business.leaderboard(
             data, platform, int(settings.get("leaderboard_size") or 20)
@@ -911,7 +1057,7 @@ class CheckinShopPlugin(Star):
         keyword = str(商品名 or "").strip()
         user_key = self._user_key(event)
         session = self._session_key(event)
-        data = await self.store.data(self._seed())
+        data = await self._settled_data()
         if not keyword:
             # 不带编号就是"给我看菜单"：发编号即可兑换，比打字输入商品名省事
             yield event.plain_result(business.catalog_text(data, user_key, self._display_prefix()))
@@ -945,6 +1091,12 @@ class CheckinShopPlugin(Star):
             )
             return
         pending = business.build_pending(data, product, session, user_key, time.time())
+        try:
+            await self.store.mutate(lambda current: self._save_pending(current, pending), self._seed())
+        except Exception:
+            logger.exception("[打卡商店] 保存兑换确认请求失败")
+            yield event.plain_result("无法保存确认请求，积分未扣除，请稍后重试。")
+            return
         self._prune_pendings()
         self._pendings[pending.token] = pending
         timeout = max(
@@ -1004,7 +1156,7 @@ class CheckinShopPlugin(Star):
         )
         if not decision.handled:
             return
-        if pending.token in self._handled_tokens:
+        if pending.token in self._handled_tokens or pending.token in self._confirming_tokens:
             return
         if not decision.ok and not decision.cancelled:
             # 超时或引用没对上：只提示、不动数据；过期请求顺手清掉，有效请求留着等正确引用
@@ -1012,13 +1164,42 @@ class CheckinShopPlugin(Star):
                 self._pendings.pop(pending.token, None)
             yield event.plain_result(decision.message)
             return
+        self._confirming_tokens.add(pending.token)
+        try:
+            def commit(data: dict):
+                now = time.time()
+                if decision.cancelled:
+                    result = {"message": f"已取消{'操作' if pending.action else '兑换'}「{pending.product_name}」。"}
+                elif pending.action:
+                    economy.settle_due(data, now)
+                    try:
+                        candidate = copy.deepcopy(data)
+                        result = economy.execute_action(candidate, user_key, pending.action, pending.params,
+                                                        pending.quote, pending.token, now)
+                        data.clear()
+                        data.update(candidate)
+                    except economy.EconomyError as exc:
+                        # 报价/规则失效仅终止本次确认；到期结算仍然正常提交。
+                        result = {"message": str(exc)}
+                else:
+                    economy.settle_due(data, now)
+                    _ok, message, _balance, _record = business.perform_redemption(data, pending, now)
+                    result = {"message": message}
+                economy.ensure(data).setdefault("pending_confirmations", {}).pop(pending.token, None)
+                return result
+            result = await self.store.mutate(commit, self._seed())
+        except Exception:
+            logger.exception("[打卡商店] 确认提交失败，保留请求以便安全重试")
+            yield event.plain_result("提交失败，积分未扣除。请在有效期内再次引用原消息确认。")
+            return
+        finally:
+            self._confirming_tokens.discard(pending.token)
         self._handled_tokens.add(pending.token)
         self._pendings.pop(pending.token, None)
-        if decision.cancelled:
-            yield event.plain_result(f"已取消兑换「{pending.product_name}」。")
-            return
-        _ok, message, _balance, _record = await self.store.mutate(
-            lambda data: business.perform_redemption(data, pending, time.time()),
-            self._seed(),
-        )
-        yield event.plain_result(message)
+        message = result["message"]
+        card = None
+        if pending.action == "lottery_buy" and "prize" in result:
+            message += f"\n当前可用积分 {result['balance']} · 票号 {result['ticket_id']}"
+            card = partial(render.render_economy, "刮刮乐开奖结果", message, self.store.render_dir, self._palette())
+        async for response in self._send(event, message, card):
+            yield response

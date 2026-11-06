@@ -42,9 +42,9 @@ except ImportError:  # pragma: no cover - 老版本
     request = None  # type: ignore[assignment]
 
 try:
-    from ..core import business, render  # type: ignore[import-not-found]
+    from ..core import business, economy, render  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - AstrBot 顶层模块加载
-    from core import business, render  # type: ignore[no-redef]
+    from core import business, economy, render  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -505,6 +505,139 @@ async def redemptions_delete(plugin) -> Any:
     return json_response({"message": message})
 
 
+# ------------------------------------------------------------------ 积分经济
+
+
+class _EconomyUserMissing(LookupError):
+    """区分不存在的用户与普通经济规则校验错误。"""
+
+
+def _economy_public(value: Any) -> Any:
+    """仅向管理页返回展示数据，隔离交易去重记录及随机源等内部状态。"""
+    if isinstance(value, dict):
+        hidden = {"operations", "market", "seed", "rng", "rng_state", "random_state"}
+        return {
+            key: _economy_public(item)
+            for key, item in value.items()
+            if isinstance(key, str)
+            and not key.startswith("_")
+            and key.lower() not in hidden
+            and not key.lower().endswith("_seed")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_economy_public(item) for item in value]
+    return value
+
+
+async def _economy_transaction(plugin, handler) -> Any:
+    """统一在存储事务中执行经济查询或管理操作，校验失败不提交副本。"""
+    try:
+        result = await plugin.store.mutate(handler, plugin._seed())
+    except _EconomyUserMissing:
+        return error_response("用户不存在，请重新搜索选择用户", status_code=404)
+    except economy.EconomyError as exc:
+        return error_response(str(exc), status_code=400)
+    return json_response(_economy_public(result))
+
+
+async def economy_overview(plugin) -> Any:
+    """经济管理概览；只公开设置、行情、竞猜和统计四类展示数据。"""
+    now = time.time()
+
+    def handler(data: dict[str, Any]) -> dict[str, Any]:
+        view = economy.overview(data, now)
+        return {
+            "settings": view.get("settings", {}),
+            "stocks": view.get("stocks", []),
+            "predictions": view.get("predictions", []),
+            "statistics": view.get("statistics", {}),
+        }
+
+    return await _economy_transaction(plugin, handler)
+
+
+async def economy_settings_save(plugin) -> Any:
+    """更新经济玩法设置；与展示设置分开，由经济模块严格校验。"""
+    payload = await request.json(default={})
+    if not isinstance(payload, dict):
+        return error_response("请求内容必须是 JSON 对象", status_code=400)
+    now = time.time()
+
+    def handler(data: dict[str, Any]) -> dict[str, Any]:
+        settings = economy.update_settings(data, payload, now)
+        return {"settings": settings, "message": "经济设置已保存"}
+
+    return await _economy_transaction(plugin, handler)
+
+
+async def economy_user(plugin) -> Any:
+    """查询已存在用户的资产，不替不存在的用户新建积分账户。"""
+    payload = await request.json(default={})
+    if not isinstance(payload, dict):
+        return error_response("请求内容必须是 JSON 对象", status_code=400)
+    user_key = payload.get("user_key")
+    if not isinstance(user_key, str) or not user_key.strip():
+        return error_response("缺少合法的 user_key", status_code=400)
+    user_key = user_key.strip()
+    now = time.time()
+
+    def handler(data: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance((data.get("users") or {}).get(user_key), dict):
+            raise _EconomyUserMissing(user_key)
+        return economy.user_assets(data, user_key, now)
+
+    return await _economy_transaction(plugin, handler)
+
+
+async def economy_predictions_create(plugin) -> Any:
+    """管理员创建竞猜；标题、选项与 Unix 截止时间由经济模块统一校验。"""
+    payload = await request.json(default={})
+    if not isinstance(payload, dict):
+        return error_response("请求内容必须是 JSON 对象", status_code=400)
+    now = time.time()
+
+    def handler(data: dict[str, Any]) -> dict[str, Any]:
+        prediction = economy.create_prediction(data, payload, now)
+        return {"prediction": prediction, "message": "竞猜已创建"}
+
+    return await _economy_transaction(plugin, handler)
+
+
+async def economy_predictions_resolve(plugin) -> Any:
+    """管理员公布一个竞猜结果，或作废退回本金；不提供代玩家下注入口。"""
+    payload = await request.json(default={})
+    if not isinstance(payload, dict):
+        return error_response("请求内容必须是 JSON 对象", status_code=400)
+    prediction_id = payload.get("prediction_id")
+    if not isinstance(prediction_id, str) or not prediction_id.strip():
+        return error_response("缺少合法的 prediction_id", status_code=400)
+    cancel = payload.get("cancel", False)
+    if type(cancel) is not bool:
+        return error_response("cancel 必须是布尔值", status_code=400)
+    option = payload.get("option")
+    if cancel and "option" in payload:
+        return error_response("作废竞猜时不能同时指定获胜选项", status_code=400)
+    if not cancel and (not isinstance(option, str) or not option.strip()):
+        return error_response("请选择获胜选项，或明确作废竞猜", status_code=400)
+    command = {"prediction_id": prediction_id.strip()}
+    if cancel:
+        command["cancel"] = True
+    else:
+        command["option"] = option.strip()
+    now = time.time()
+
+    def handler(data: dict[str, Any]) -> dict[str, Any]:
+        prediction = economy.resolve_prediction(data, command, now)
+        status = prediction.get("status")
+        message = {
+            "cancelled": "竞猜已作废并返还本金",
+            "void": "竞猜无人押中，已返还本金",
+        }.get(status, "竞猜已结算")
+        return {"prediction": prediction, "message": message}
+
+    return await _economy_transaction(plugin, handler)
+
+
 # ------------------------------------------------------------------ 账单流水
 
 
@@ -598,6 +731,11 @@ class DashboardAPI:
             (f"/{PLUGIN_ID}/shop/products/image/upload", products_image_upload, ["POST"], "打卡商店：上传商品图片"),
             (f"/{PLUGIN_ID}/shop/users", users_list, ["POST"], "打卡商店：用户积分列表"),
             (f"/{PLUGIN_ID}/shop/users/adjust", users_adjust, ["POST"], "打卡商店：调整用户积分"),
+            (f"/{PLUGIN_ID}/shop/economy/overview", economy_overview, ["GET"], "打卡商店：经济管理概览"),
+            (f"/{PLUGIN_ID}/shop/economy/settings", economy_settings_save, ["POST"], "打卡商店：保存经济设置"),
+            (f"/{PLUGIN_ID}/shop/economy/user", economy_user, ["POST"], "打卡商店：查询用户资产"),
+            (f"/{PLUGIN_ID}/shop/economy/predictions/create", economy_predictions_create, ["POST"], "打卡商店：创建竞猜"),
+            (f"/{PLUGIN_ID}/shop/economy/predictions/resolve", economy_predictions_resolve, ["POST"], "打卡商店：结算或作废竞猜"),
             (f"/{PLUGIN_ID}/shop/ledger", ledger_list, ["POST"], "打卡商店：账单流水"),
             (f"/{PLUGIN_ID}/shop/ledger/export", ledger_export, ["GET"], "打卡商店：导出流水 CSV"),
             (f"/{PLUGIN_ID}/shop/redemptions", redemptions_list, ["POST"], "打卡商店：兑换记录"),

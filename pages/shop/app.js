@@ -27,6 +27,10 @@ const state = {
   adjustUserKey: '',
   assetUrls: {},
   rewardsLoaded: false,
+  economy: null,
+  economyLoaded: false,
+  assetUserKey: '',
+  assetRequest: 0,
 };
 
 const PAGE_SIZE = 20;
@@ -135,7 +139,7 @@ function readInteger(inputId, { allowEmpty, min = 0 }) {
       : { value: null, error: '这一项不能为空，请填写一个不小于 0 的整数。' };
   }
   const value = Number(raw);
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+  if (!Number.isSafeInteger(value)) {
     return { value: null, error: '请填写整数。' };
   }
   if (value < min) {
@@ -186,6 +190,7 @@ async function post(endpoint, body) {
 const modalReturnFocus = new WeakMap();
 
 function topModal() {
+  if ($('confirm-modal') && !$('confirm-modal').hidden) return $('confirm-modal');
   return Array.from(document.querySelectorAll('.modal:not([hidden])')).at(-1) || null;
 }
 
@@ -523,9 +528,21 @@ function renderProducts() {
     const cells = row.querySelectorAll('td');
     cells[0].textContent = numbers.get(product.id) || '';
     setClipText(cells[2], product.name);
+    if (product.product_type && product.product_type !== 'normal') {
+      const type = document.createElement('small');
+      type.className = 'product-type-label';
+      type.textContent = product.product_type === 'checkin_boost' ? '签到增益卡' : '余额返利卡';
+      cells[2].appendChild(type);
+    }
     cells[3].textContent = `${product.cost} 积分`;
     cells[4].textContent = String(stock);
     cells[5].textContent = String(limit);
+    if (product.per_user_daily_limit !== null && product.per_user_daily_limit !== undefined) {
+      const daily = document.createElement('small');
+      daily.className = 'product-type-label';
+      daily.textContent = `每日 ${product.per_user_daily_limit}`;
+      cells[5].appendChild(daily);
+    }
     cells[6].textContent = product.category || '默认';
     const toggle = document.createElement('button');
     toggle.type = 'button';
@@ -699,6 +716,9 @@ async function toggleProduct(product, trigger) {
           cost: product.cost,
           stock: product.stock,
           per_user_limit: product.per_user_limit,
+          per_user_daily_limit: product.per_user_daily_limit ?? null,
+          product_type: product.product_type || 'normal',
+          effect_config: product.effect_config || {},
           category: product.category || '默认',
           description: product.description || '',
           enabled: next,
@@ -762,17 +782,58 @@ function openProduct(product) {
       ? product.per_user_limit
       : '';
   $('p-category').value = product ? product.category || '' : '';
+  $('p-type').value = product?.product_type || 'normal';
+  $('p-daily-limit').value = product?.per_user_daily_limit ?? '';
+  const effect = product?.effect_config || {};
+  $('p-boost-multiplier').value = (effect.multiplier_bps ?? 20000) / 100;
+  $('p-boost-days').value = effect.days ?? 7;
+  $('p-boost-cap').value = effect.daily_bonus_cap ?? 20;
+  $('p-rebate-rate').value = (effect.rebate_bps ?? 1500) / 100;
+  $('p-rebate-cap').value = effect.rebate_cap ?? 350;
+  $('p-rebate-cooldown').value = effect.cooldown_hours ?? 168;
   $('p-desc').value = product ? product.description || '' : '';
   $('p-enabled').checked = product ? product.enabled !== false : true;
   $('p-image').value = '';
-  clearErrors(['p-name', 'p-cost', 'p-stock', 'p-limit']);
+  clearErrors(PRODUCT_FIELDS);
   state.editingImagePath = product ? product.image_path || '' : '';
   state.previewProductId = editing ? product.id : '';
   // 编辑时保留原有 sort_order，否则"保存一下就跳到列表最后"（序号会跟着变）
   state.editingSortOrder = editing ? Number(product.sort_order) || 0 : null;
   state.pendingImage = null;
+  syncProductType();
   renderProductPreview();
   showModal('product-modal', $('p-name'));
+}
+
+const PRODUCT_FIELDS = ['p-name', 'p-cost', 'p-stock', 'p-limit', 'p-daily-limit', 'p-type', 'p-boost-multiplier', 'p-boost-days', 'p-boost-cap', 'p-rebate-rate', 'p-rebate-cap', 'p-rebate-cooldown'];
+
+// 百分比最多两位小数，先按字符串拆分，避免浮点乘法改变基点值。
+function readPercent(inputId, minBps = 0, maxBps = 10000) {
+  const raw = String($(inputId).value).trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) return { value: null, error: '请填写非负百分比，最多两位小数。' };
+  const [whole, fraction = ''] = raw.split('.');
+  const value = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+  if (!Number.isSafeInteger(value) || value < minBps || value > maxBps) return { value: null, error: `请填写 ${minBps / 100}% 至 ${maxBps / 100}% 之间的数值。` };
+  return { value, error: '' };
+}
+
+function syncProductType(applyDefaults = false) {
+  const type = $('p-type').value;
+  const boost = type === 'checkin_boost';
+  const rebate = type === 'balance_rebate';
+  $('p-effect-fields').hidden = !boost && !rebate;
+  $('p-boost-fields').hidden = !boost;
+  $('p-rebate-fields').hidden = !rebate;
+  if (applyDefaults && !state.previewProductId && (boost || rebate)) $('p-cost').value = boost ? 50 : 300;
+  updateProductEffectSummary();
+}
+
+function updateProductEffectSummary() {
+  if ($('p-type').value === 'checkin_boost') {
+    $('p-effect-summary').textContent = `兑换后次日生效，持续 ${$('p-boost-days').value || '—'} 个签到日；基础签到积分按 ${$('p-boost-multiplier').value || '—'}% 计算，额外积分每日最多 ${$('p-boost-cap').value || '0'} 分，不含连签奖励。已有待生效或生效中的卡时不能重复购买。`;
+  } else {
+    $('p-effect-summary').textContent = `兑换时按扣购卡价前的可用钱包余额返还 ${$('p-rebate-rate').value || '0'}%，最高 ${$('p-rebate-cap').value || '0'} 积分；存款、持仓与竞猜资金不计入。返还少于卡价时不可兑换，同类卡冷却 ${$('p-rebate-cooldown').value || '0'} 小时。`;
+  }
 }
 
 function closeProduct() {
@@ -801,16 +862,31 @@ function renderProductPreview() {
 
 async function saveProduct() {
   $('product-modal-status').hidden = true;
-  clearErrors(['p-name', 'p-cost', 'p-stock', 'p-limit']);
+  clearErrors(PRODUCT_FIELDS);
   const name = $('p-name').value.trim();
   const cost = readInteger('p-cost', { allowEmpty: false, min: 0 });
   const stock = readInteger('p-stock', { allowEmpty: true, min: 0 });
   const limit = readInteger('p-limit', { allowEmpty: true, min: 0 });
+  const dailyLimit = readInteger('p-daily-limit', { allowEmpty: true, min: 0 });
+  const type = $('p-type').value;
+  const effect = {};
   if (!name) setFieldError('p-name', '商品名称不能为空，用户端会用它显示商品。');
   if (cost.error) setFieldError('p-cost', cost.error);
   if (stock.error) setFieldError('p-stock', stock.error);
   if (limit.error) setFieldError('p-limit', limit.error);
-  if (focusFirstInvalid(['p-name', 'p-cost', 'p-stock', 'p-limit'])) return;
+  if (dailyLimit.error) setFieldError('p-daily-limit', dailyLimit.error);
+  if (!['normal', 'checkin_boost', 'balance_rebate'].includes(type)) setFieldError('p-type', '请选择有效的商品类型。');
+  const effectFields = type === 'checkin_boost'
+    ? [['p-boost-multiplier', 'multiplier_bps', 10000, true], ['p-boost-days', 'days', 1], ['p-boost-cap', 'daily_bonus_cap', 0]]
+    : type === 'balance_rebate' ? [['p-rebate-rate', 'rebate_bps', 1, true], ['p-rebate-cap', 'rebate_cap', 0], ['p-rebate-cooldown', 'cooldown_hours', 0]] : [];
+  effectFields.forEach(([id, key, min, percent]) => {
+    const result = percent ? readPercent(id, min, key === 'multiplier_bps' ? 1000000 : 10000) : readInteger(id, { allowEmpty: false, min });
+    const max = key === 'days' ? 365 : key === 'cooldown_hours' ? 87600 : Number.MAX_SAFE_INTEGER;
+    if (!result.error && result.value > max) result.error = `请填写不大于 ${max} 的整数。`;
+    if (result.error) setFieldError(id, result.error);
+    else effect[key] = result.value;
+  });
+  if (focusFirstInvalid(PRODUCT_FIELDS)) return;
 
   const payload = {
     id: state.previewProductId || '',
@@ -818,6 +894,9 @@ async function saveProduct() {
     cost: cost.value || 0,
     stock: stock.value,
     per_user_limit: limit.value,
+    per_user_daily_limit: dailyLimit.value,
+    product_type: type,
+    effect_config: effect,
     category: $('p-category').value.trim() || '默认',
     description: $('p-desc').value.trim(),
     enabled: $('p-enabled').checked,
@@ -950,6 +1029,14 @@ async function loadUsers(page) {
     button.textContent = '调整积分';
     button.addEventListener('click', () => openAdjust(user));
     cells[6].appendChild(button);
+    const assets = document.createElement('button');
+    assets.className = 'btn btn-secondary';
+    assets.type = 'button';
+    assets.textContent = '资产详情';
+    assets.dataset.action = 'assets';
+    assets.addEventListener('click', () => openAssets(user));
+    cells[6].classList.add('user-actions');
+    cells[6].appendChild(assets);
     tbody.appendChild(row);
   });
   const empty = state.userRows.length === 0;
@@ -1189,6 +1276,14 @@ async function loadLedger(page) {
   });
   state.ledgerRows = result.items || [];
   state.ledgerTotal = result.total || 0;
+  if (Array.isArray(result.types)) {
+    const selected = $('ledger-type').value;
+    const types = [...new Set(['打卡', '兑换', '返还', '调整', ...result.types, ...(selected ? [selected] : [])])];
+    $('ledger-type').replaceChildren();
+    const all = document.createElement('option'); all.value = ''; all.textContent = '全部类型'; $('ledger-type').appendChild(all);
+    types.forEach((value) => { const option = document.createElement('option'); option.value = String(value); option.textContent = String(value); $('ledger-type').appendChild(option); });
+    $('ledger-type').value = selected;
+  }
   renderLedgerSummary(result);
   const tbody = $('ledger-table').querySelector('tbody');
   tbody.innerHTML = '';
@@ -1213,6 +1308,15 @@ async function loadLedger(page) {
     cells[3].className = `num ${points >= 0 ? 'delta-in' : 'delta-out'}`;
     cells[4].textContent = String(entry.balance ?? '-');
     setClipText(cells[5], entry.note || '-');
+    const details = [];
+    if (entry.source !== null && entry.source !== undefined && String(entry.source).trim()) details.push(String(entry.source));
+    if (typeof entry.fee === 'number' && Number.isFinite(entry.fee)) details.push(`费用 ${entry.fee}`);
+    if (typeof entry.profit === 'number' && Number.isFinite(entry.profit)) details.push(`收益 ${entry.profit > 0 ? '+' : ''}${entry.profit}`);
+    if (details.length) {
+      const meta = textNode('span', details.join(' / '), 'ledger-meta');
+      meta.title = meta.textContent;
+      cells[5].appendChild(meta);
+    }
     tbody.appendChild(row);
   });
   const empty = state.ledgerRows.length === 0;
@@ -1245,6 +1349,350 @@ async function exportLedger() {
   } catch (error) {
     say(`导出失败：${errorText(error)}`, 'error');
   }
+}
+
+// ---------------------------------------------------------------- 玩法配置（仅管理员配置与只读资产，不提供玩家交易入口）
+
+const ECONOMY_SWITCHES = {
+  stocks_enabled: 'e-stocks-enabled', savings_enabled: 'e-savings-enabled',
+  predictions_enabled: 'e-predictions-enabled', auto_predictions_enabled: 'e-auto-predictions-enabled',
+  lottery_enabled: 'e-lottery-enabled', checkin_cards_enabled: 'e-checkin-cards-enabled',
+  rebate_cards_enabled: 'e-rebate-cards-enabled',
+};
+
+const ECONOMY_FIELDS = [
+  ['stock_fee_bps', 'stock', '交易手续费（%）', 100, 0, 10000, true],
+  ['stock_hourly_bps', 'stock', '每小时最大涨跌（%）', 200, 0, 10000, true],
+  ['stock_daily_bps', 'stock', '每日最大涨跌（%）', 1000, 0, 10000, true],
+  ['stock_daily_trades', 'stock', '每人每日交易次数', 20, 0, Number.MAX_SAFE_INTEGER],
+  ['stock_daily_buy_limit', 'stock', '每人每日买入积分上限', 1000, 0, Number.MAX_SAFE_INTEGER],
+  ['savings_rate_bps', 'savings', '每日收益率（%）', 5, 0, 10000, true],
+  ['savings_principal_cap', 'savings', '每人本金上限（积分）', 5000, 0, Number.MAX_SAFE_INTEGER],
+  ['prediction_min', 'prediction', '单次最低投入（积分）', 5, 1, Number.MAX_SAFE_INTEGER],
+  ['prediction_max', 'prediction', '单次最高投入（积分）', 50, 1, Number.MAX_SAFE_INTEGER],
+  ['prediction_daily_limit', 'prediction', '每人每日投入上限（积分）', 100, 0, Number.MAX_SAFE_INTEGER],
+  ['prediction_payout_bps', 'prediction', '奖池返还比例（%）', 9500, 0, 10000, true],
+  ['prediction_timeout_days', 'prediction', '未判定自动作废天数', 7, 1, Number.MAX_SAFE_INTEGER],
+  ['auto_close_minutes', 'prediction', '下一整点前封盘（分钟）', 5, 1, 59],
+  ['lottery_cost', 'lottery', '每张消耗（积分）', 10, 1, Number.MAX_SAFE_INTEGER],
+  ['lottery_daily_limit', 'lottery', '每人每日购买次数', 3, 0, Number.MAX_SAFE_INTEGER],
+  ['checkin_card_daily_limit', 'card', '签到增益卡同类每日限购', 1, 0, Number.MAX_SAFE_INTEGER],
+  ['rebate_card_daily_limit', 'card', '余额返利卡同类每日限购', 1, 0, Number.MAX_SAFE_INTEGER],
+];
+
+const DEFAULT_LOTTERY_PRIZES = [{ points: 0, weight: 45 }, { points: 5, weight: 20 }, { points: 10, weight: 25 }, { points: 40, weight: 9 }, { points: 100, weight: 1 }];
+const economyInputId = (key) => `e-${key.replaceAll('_', '-')}`;
+
+function textNode(tag, value, className) {
+  const node = document.createElement(tag);
+  node.textContent = value === null || value === undefined ? '—' : String(value);
+  if (className) node.className = className;
+  return node;
+}
+
+function beijingTime(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const date = new Date(Number(value) * 1000);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+}
+
+function stockPrice(stock) {
+  if (stock.price_text !== undefined) return String(stock.price_text);
+  const cent = Number(stock.price_cent ?? stock.price);
+  return Number.isFinite(cent) ? (cent / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+}
+
+function setupEconomyFields() {
+  ECONOMY_FIELDS.forEach(([key, group, title, fallback, min, max, percent]) => {
+    const id = economyInputId(key);
+    const label = document.createElement('label');
+    label.appendChild(textNode('span', title, 'field-label'));
+    const input = document.createElement('input');
+    Object.assign(input, { id, type: 'number', min: String(percent ? min / 100 : min), max: String(percent ? max / 100 : max), step: percent ? '0.01' : '1' });
+    input.setAttribute('aria-describedby', `${id}-error`);
+    label.appendChild(input);
+    const error = textNode('span', '', 'field-error');
+    error.id = `${id}-error`;
+    label.appendChild(error);
+    $(`economy-${group}-fields`).appendChild(label);
+  });
+}
+
+let prizeSequence = 0;
+function addLotteryPrize(prize = { points: 0, weight: 1 }) {
+  const list = $('lottery-prizes');
+  if (list.children.length >= 30) { $('lottery-prizes-error').textContent = '最多添加 30 项奖项。'; return; }
+  const row = document.createElement('div');
+  row.className = 'prize-row';
+  const sequence = prizeSequence++;
+  [['points', '中奖积分'], ['weight', '权重']].forEach(([key, title]) => {
+    const label = document.createElement('label');
+    label.appendChild(textNode('span', title, 'field-label'));
+    const input = document.createElement('input');
+    Object.assign(input, { id: `lottery-${key}-${sequence}`, type: 'number', min: '0', step: '1', value: String(prize[key] ?? '') });
+    input.dataset.prizeField = key;
+    input.addEventListener('input', updateLotteryProbabilities);
+    label.appendChild(input);
+    const error = textNode('span', '', 'field-error');
+    error.id = `${input.id}-error`;
+    input.setAttribute('aria-describedby', error.id);
+    label.appendChild(error);
+    row.appendChild(label);
+  });
+  row.appendChild(textNode('span', '', 'prize-probability'));
+  const remove = textNode('button', '移除', 'btn-link is-quiet');
+  remove.type = 'button'; remove.setAttribute('aria-label', '移除此奖项');
+  remove.addEventListener('click', () => {
+    row.remove(); updateLotteryProbabilities();
+    $('lottery-prize-add').focus();
+  });
+  row.appendChild(remove); list.appendChild(row);
+  updateLotteryProbabilities();
+}
+
+function updateLotteryProbabilities() {
+  const rows = Array.from($('lottery-prizes').children);
+  const weights = rows.map((row) => Number(row.querySelector('[data-prize-field="weight"]').value));
+  const valid = weights.every((value) => Number.isSafeInteger(value) && value >= 0);
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  rows.forEach((row, index) => { row.querySelector('.prize-probability').textContent = valid && total > 0 ? `${(weights[index] / total * 100).toFixed(2)}%` : '概率 —'; });
+  $('lottery-prize-add').disabled = rows.length >= 30;
+}
+
+function fillEconomySettings(settings) {
+  Object.entries(ECONOMY_SWITCHES).forEach(([key, id]) => { $(id).checked = settings[key] === true; });
+  $('prediction-new').disabled = settings.predictions_enabled !== true;
+  $('prediction-new').title = settings.predictions_enabled === true ? '创建管理员事件竞猜' : '启用并保存竞猜设置后可创建';
+  ECONOMY_FIELDS.forEach(([key, , , fallback, , , percent]) => {
+    const value = settings[key] ?? fallback;
+    $(economyInputId(key)).value = percent ? Number(value) / 100 : value;
+    setFieldError(economyInputId(key), '');
+  });
+  const select = $('e-auto-stock-code');
+  select.replaceChildren();
+  const stocks = Array.isArray(state.economy?.stocks) ? state.economy.stocks : [];
+  const chosen = String(settings.auto_stock_code || 'ST01');
+  const codes = new Set();
+  stocks.forEach((stock) => {
+    if (!stock.code || codes.has(stock.code)) return;
+    codes.add(stock.code);
+    const option = textNode('option', `${stock.code} · ${stock.name || stock.code}`);
+    option.value = stock.code; select.appendChild(option);
+  });
+  if (!codes.has(chosen)) { const option = textNode('option', `${chosen}（当前配置）`); option.value = chosen; select.appendChild(option); }
+  select.value = chosen;
+  $('lottery-prizes').replaceChildren();
+  (Array.isArray(settings.lottery_prizes) ? settings.lottery_prizes : DEFAULT_LOTTERY_PRIZES).forEach(addLotteryPrize);
+  $('lottery-prizes-error').textContent = '';
+}
+
+function renderEconomyOverview() {
+  const data = state.economy || {};
+  const statistics = data.statistics || {};
+  const metrics = $('economy-statistics'); metrics.replaceChildren();
+  [['积分通本金', statistics.savings_principal], ['股票持有人数', statistics.stock_holders], ['未结算竞猜', statistics.open_predictions], ['竞猜锁定积分', statistics.locked_prediction]].forEach(([title, value]) => {
+    const card = document.createElement('div'); card.append(textNode('span', title), textNode('b', formatStat(value))); metrics.appendChild(card);
+  });
+  const stocks = Array.isArray(data.stocks) ? data.stocks : [];
+  const body = $('economy-stock-table').querySelector('tbody'); body.replaceChildren();
+  stocks.forEach((stock) => {
+    const row = document.createElement('tr');
+    row.append(textNode('td', `${stock.code || '—'} · ${stock.name || '—'}`), textNode('td', `${stockPrice(stock)} 积分`, 'num'), textNode('td', Number.isFinite(Number(stock.change_bps)) ? `${Number(stock.change_bps) > 0 ? '+' : ''}${(Number(stock.change_bps) / 100).toFixed(2)}%` : '—', 'num'), textNode('td', beijingTime(stock.last_updated)));
+    body.appendChild(row);
+  });
+  $('economy-stock-table').closest('.table-wrap').hidden = !stocks.length;
+  $('economy-stocks-empty').hidden = Boolean(stocks.length);
+  renderPredictions(Array.isArray(data.predictions) ? data.predictions : []);
+}
+
+async function loadEconomy() {
+  $('economy-load-status').textContent = '正在加载玩法配置…';
+  try {
+    const result = await bridge.apiGet('shop/economy/overview');
+    if (!result?.settings || typeof result.settings !== 'object' || Array.isArray(result.settings)) throw new Error('接口未返回有效玩法配置');
+    state.economy = result; state.economyLoaded = true;
+    fillEconomySettings(result.settings); renderEconomyOverview();
+    $('economy-config').hidden = false; $('save-economy').disabled = false;
+    $('economy-load-status').textContent = '配置已加载。保存设置后生效；行情与资产由机器人自动维护。';
+    return true;
+  } catch (error) {
+    $('economy-load-status').textContent = `玩法配置加载失败：${errorText(error)}。请点击「刷新玩法」重试。`;
+    $('save-economy').disabled = !state.economyLoaded;
+    return false;
+  }
+}
+
+async function saveEconomy() {
+  if (!state.economyLoaded) { say('请先成功加载玩法配置。', 'error'); return; }
+  const payload = {};
+  const ids = [];
+  Object.entries(ECONOMY_SWITCHES).forEach(([key, id]) => { payload[key] = $(id).checked; });
+  ECONOMY_FIELDS.forEach(([key, , , , min, max, percent]) => {
+    const id = economyInputId(key); ids.push(id); setFieldError(id, '');
+    const result = percent ? readPercent(id, min, max) : readInteger(id, { allowEmpty: false, min });
+    if (!result.error && result.value > max) result.error = `请填写不大于 ${max} 的整数。`;
+    if (result.error) setFieldError(id, result.error);
+    else payload[key] = result.value;
+  });
+  if (payload.prediction_min > payload.prediction_max) setFieldError(economyInputId('prediction_max'), '最高投入不能小于最低投入。');
+  payload.auto_stock_code = $('e-auto-stock-code').value;
+  ids.push('e-auto-stock-code'); setFieldError('e-auto-stock-code', /^ST0[1-4]$/.test(payload.auto_stock_code) ? '' : '请选择 ST01 至 ST04 中的一只股票。');
+  const prizes = []; let prizeError = '';
+  Array.from($('lottery-prizes').children).forEach((row, index) => {
+    const prize = {};
+    row.querySelectorAll('[data-prize-field]').forEach((input) => {
+      ids.push(input.id); setFieldError(input.id, '');
+      const raw = input.value.trim();
+      const result = /^\d+$/.test(raw) && Number.isSafeInteger(Number(raw)) ? Number(raw) : null;
+      if (result === null) { setFieldError(input.id, `第 ${index + 1} 项必须是非负整数。`); prizeError ||= '请修正奖项中的非法积分或权重。'; }
+      else prize[input.dataset.prizeField] = result;
+    });
+    prizes.push(prize);
+  });
+  if (!prizes.length || prizes.length > 30) prizeError = '奖表需包含 1 至 30 项。';
+  else if (!prizeError && !prizes.some((item) => item.weight > 0)) prizeError = '至少一项奖项权重必须大于 0。';
+  $('lottery-prizes-error').textContent = prizeError;
+  const invalid = ids.find((id) => $(id)?.getAttribute('aria-invalid') === 'true');
+  if (invalid || prizeError) {
+    const input = invalid ? $(invalid) : $('lottery-prizes-error');
+    const details = input.closest('details'); if (details) details.open = true;
+    input.scrollIntoView({ block: 'center' }); if (invalid) input.focus();
+    say('玩法设置未保存，请修正标记的输入项。', 'error'); return;
+  }
+  payload.lottery_prizes = prizes;
+  const result = await post('shop/economy/settings', payload);
+  if (result.settings) { state.economy.settings = result.settings; fillEconomySettings(result.settings); }
+  say(result.message || '玩法设置已保存', 'ok');
+}
+
+function renderPredictions(predictions) {
+  const list = $('economy-prediction-list'); list.replaceChildren();
+  $('economy-predictions-empty').hidden = Boolean(predictions.length);
+  predictions.forEach((prediction) => {
+    const card = document.createElement('article'); card.className = 'prediction-item';
+    const title = textNode('h4', prediction.title || '未命名竞猜');
+    const closeAt = Number(prediction.close_at ?? prediction.closes_at);
+    const status = prediction.status || 'open';
+    const terminal = ['resolved', 'settled', 'cancelled', 'canceled', 'void', '已结算', '已作废'].includes(status);
+    const closed = status === 'closed' || (Number.isFinite(closeAt) && closeAt <= Date.now() / 1000);
+    const auto = prediction.source === 'auto';
+    const statusTitle = terminal ? (status === 'void' ? '无胜方，已返还' : ['cancelled', 'canceled', '已作废'].includes(status) ? '已作废' : '已判定') : closed ? '已封盘' : '进行中';
+    const heading = document.createElement('div'); heading.className = 'section-heading'; heading.append(title, textNode('span', `${auto ? '自动' : '管理员'} · ${statusTitle}`, 'tag')); card.appendChild(heading);
+    card.appendChild(textNode('p', `编号 ${prediction.id || '—'} · 封盘 ${beijingTime(closeAt)} · 参与 ${prediction.participants ?? 0} 人 · 投入 ${prediction.total_stake ?? 0} 积分`, 'muted'));
+    const options = Array.isArray(prediction.options) ? prediction.options : [];
+    card.appendChild(textNode('p', `选项：${options.join(' / ') || '—'}${prediction.winner ? ` · 获胜：${prediction.winner}` : ''}`, 'prediction-options'));
+    if (!terminal && prediction.id) {
+      const actions = document.createElement('div'); actions.className = 'prediction-actions';
+      if (!auto) {
+        const select = document.createElement('select'); select.setAttribute('aria-label', `为${prediction.title || prediction.id}选择获胜选项`);
+        const blank = textNode('option', '选择获胜选项'); blank.value = ''; select.appendChild(blank);
+        options.forEach((value) => { const option = textNode('option', value); option.value = String(value); select.appendChild(option); });
+        const resolve = textNode('button', '判定结果', 'btn btn-primary'); resolve.type = 'button';
+        resolve.disabled = !closed; resolve.title = closed ? '选择获胜选项后判定' : '竞猜封盘后才能判定';
+        resolve.addEventListener('click', () => {
+          if (!select.value) { say('请先选择获胜选项。', 'error'); select.focus(); return; }
+          resolvePrediction(prediction, select.value, false, resolve).catch((error) => say(errorText(error), 'error'));
+        });
+        actions.append(select, resolve);
+      } else actions.appendChild(textNode('span', '股市竞猜将自动判定', 'muted'));
+      const cancel = textNode('button', '作废并返还', 'btn btn-secondary'); cancel.type = 'button';
+      cancel.addEventListener('click', () => resolvePrediction(prediction, '', true, cancel).catch((error) => say(errorText(error), 'error')));
+      actions.appendChild(cancel); card.appendChild(actions);
+    }
+    list.appendChild(card);
+  });
+}
+
+function openPrediction() {
+  clearErrors(['prediction-title', 'prediction-options', 'prediction-closes']);
+  $('prediction-title').value = ''; $('prediction-options').value = '';
+  $('prediction-closes').value = '';
+  showModal('prediction-modal', $('prediction-title'));
+}
+
+function closePrediction() { if (!$('prediction-modal').querySelector('.is-busy')) hideModal('prediction-modal'); }
+
+function parseBeijingLocal(value) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(value)) return NaN;
+  const date = new Date(`${value}+08:00`);
+  return date.getTime() / 1000;
+}
+
+async function createPrediction() {
+  if (state.economy?.settings?.predictions_enabled !== true) { say('请先启用并保存竞猜设置。', 'error'); return; }
+  clearErrors(['prediction-title', 'prediction-options', 'prediction-closes']);
+  const title = $('prediction-title').value.trim();
+  const options = $('prediction-options').value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const closesAt = parseBeijingLocal($('prediction-closes').value);
+  if (!title || title.length > 100) setFieldError('prediction-title', '请填写 1 至 100 字的事件标题。');
+  if (options.length < 2 || options.length > 6 || options.some((value) => value.length > 40) || new Set(options).size !== options.length) setFieldError('prediction-options', '请填写 2 至 6 个不同的选项，每项不超过 40 字。');
+  if (!Number.isFinite(closesAt) || closesAt <= Date.now() / 1000) setFieldError('prediction-closes', '请填写未来的北京时间。');
+  if (focusFirstInvalid(['prediction-title', 'prediction-options', 'prediction-closes'])) return;
+  const result = await post('shop/economy/predictions/create', { title, options, closes_at: closesAt });
+  hideModal('prediction-modal'); await loadEconomy();
+  say(result.message || '管理员竞猜已创建', 'ok');
+}
+
+async function resolvePrediction(prediction, option, cancel, button) {
+  const confirmed = await askConfirm({ title: cancel ? '作废竞猜并返还' : '判定竞猜结果', message: cancel ? `确定作废「${prediction.title}」并返还参与积分吗？` : `确定将「${prediction.title}」的获胜选项判为「${option}」吗？判定后将按规则结算。`, confirmText: cancel ? '作废并返还' : '确认判定', danger: true });
+  if (!confirmed) return;
+  await withBusy(button, async () => {
+    const result = await post('shop/economy/predictions/resolve', { prediction_id: prediction.id, ...(cancel ? { cancel: true } : { option }) });
+    await loadEconomy(); say(result.message || (cancel ? '竞猜已作废' : '竞猜已判定'), 'ok');
+  }, '处理中');
+}
+
+function assetDefinition(title, entries) {
+  const section = document.createElement('section'); section.className = 'asset-section'; section.appendChild(textNode('h4', title));
+  const list = document.createElement('dl'); list.className = 'asset-definition';
+  entries.forEach(([label, value]) => list.append(textNode('dt', label), textNode('dd', value)));
+  section.appendChild(list); return section;
+}
+
+async function openAssets(user) {
+  const requestId = ++state.assetRequest;
+  state.assetUserKey = user.user_key;
+  $('asset-user').textContent = `${user.nickname || user.user_id || '用户'} · ${user.user_key}`;
+  $('asset-content').replaceChildren(textNode('p', '正在读取资产…', 'muted'));
+  showModal('asset-modal', $('asset-close-top'));
+  try {
+    const result = await post('shop/economy/user', { user_key: user.user_key });
+    if (requestId !== state.assetRequest || $('asset-modal').hidden) return;
+    renderAssets(result || {});
+  } catch (error) {
+    if (requestId === state.assetRequest && !$('asset-modal').hidden) say(`资产加载失败：${errorText(error)}`, 'error');
+  }
+}
+
+function closeAssets() { state.assetRequest += 1; hideModal('asset-modal'); }
+
+function renderAssets(data) {
+  const content = $('asset-content'); content.replaceChildren();
+  const savings = data.savings || {};
+  content.appendChild(assetDefinition('钱包与积分通', [['可用钱包', `${formatStat(data.wallet)} 积分`], ['积分通本金', `${formatStat(savings.principal)} 积分`], ['累计收益', `${formatStat(savings.interest_earned)} 积分`], ['当前每日收益率', savings.rate_bps === undefined ? '—' : `${Number(savings.rate_bps) / 100}%`], ['预计下次整积分收益', beijingTime(savings.next_settlement_at)], ['收益计算截至', beijingTime(savings.last_accrual_at)], ['竞猜锁定积分', `${formatStat(data.locked_prediction)} 积分`], ['股票已实现盈亏', `${formatStat(data.stock_realized_profit ?? 0)} 积分`]]));
+  const positions = Array.isArray(data.positions) ? data.positions : [];
+  const positionSection = document.createElement('section'); positionSection.className = 'asset-section'; positionSection.appendChild(textNode('h4', '股票持仓'));
+  if (!positions.length) positionSection.appendChild(textNode('p', '暂无持仓', 'muted'));
+  positions.forEach((position) => positionSection.appendChild(assetDefinition(`${position.code || '—'} · ${position.name || '—'}`, [['数量', position.quantity ?? '—'], ['当前单价', `${stockPrice(position)} 积分`], ['持仓市值', position.market_value_text ?? (position.market_value === undefined ? '—' : `${position.market_value} 积分`)], ['累计成本', position.cost_total_text ?? (position.cost_total === undefined ? '—' : `${position.cost_total} 积分`)]])));
+  content.appendChild(positionSection);
+  const cards = data.cards || {};
+  const cardEntries = [];
+  const boost = cards.checkin_boost || cards.boost;
+  const usage = data.daily_usage && typeof data.daily_usage === 'object' ? data.daily_usage : {};
+  const today = usage.date || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+  if (boost) {
+    const status = boost.start_date && today < boost.start_date ? '待生效' : boost.end_date && today >= boost.end_date ? '已到期' : boost.status || '生效中';
+    cardEntries.push(['签到增益卡', `${status}${boost.multiplier_bps !== undefined ? ` · ${Number(boost.multiplier_bps) / 100}%` : ''}${boost.start_date ? ` · 生效日 ${boost.start_date}` : ''}${boost.end_date ? ` · 截至 ${boost.end_date}（不含该日）` : ''}${boost.daily_bonus_cap !== undefined ? ` · 每日额外最多 ${boost.daily_bonus_cap} 分` : ''}`]);
+  }
+  if (cards.rebate_last_at) cardEntries.push(['上次余额返利', beijingTime(cards.rebate_last_at)]);
+  if (cards.rebate_cooldown_until) cardEntries.push(['余额返利卡', Number(cards.rebate_cooldown_until) > Date.now() / 1000 ? `冷却至 ${beijingTime(cards.rebate_cooldown_until)}` : '冷却已结束']);
+  content.appendChild(assetDefinition('卡券状态', cardEntries.length ? cardEntries : [['当前状态', '暂无有效卡券或冷却记录']]));
+  const usageLabels = { date: '签到日', stock_trades: '股票交易次数', stock_buy_total: '股票买入积分', prediction_stake: '竞猜投入积分', lottery_count: '刮刮乐次数' };
+  const usageEntries = Object.entries(usage).filter(([key, value]) => usageLabels[key] && (typeof value === 'number' || typeof value === 'string')).map(([key, value]) => [usageLabels[key], value]);
+  Object.entries(usage.families || {}).forEach(([key, value]) => {
+    if (['checkin_boost', 'balance_rebate'].includes(key)) usageEntries.push([key === 'checkin_boost' ? '签到增益卡购买' : '余额返利卡购买', value]);
+  });
+  content.appendChild(assetDefinition('今日使用情况', usageEntries.length ? usageEntries : [['当前状态', '暂无今日使用记录']]));
 }
 
 // ---------------------------------------------------------------- 初始化
@@ -1291,6 +1739,7 @@ function bindTabs() {
       if (tab.dataset.tab === 'users') run(null, () => loadUsers(1));
       if (tab.dataset.tab === 'redemptions') run(null, () => loadRedemptions(1));
       if (tab.dataset.tab === 'ledger') run(null, () => loadLedger(1));
+      if (tab.dataset.tab === 'economy') run(null, loadEconomy);
     });
   });
 }
@@ -1305,13 +1754,17 @@ async function boot() {
   logo.addEventListener('error', () => { logo.hidden = true; });
   if (logo.complete && !logo.naturalWidth) logo.hidden = true;
   bindTabs();
+  setupEconomyFields();
   bindModalFocus();
   bindModalDismiss('product-modal', closeProduct);
   bindModalDismiss('adjust-modal', closeAdjust);
+  bindModalDismiss('prediction-modal', closePrediction);
+  bindModalDismiss('asset-modal', closeAssets);
   $('status-close').addEventListener('click', () => say(''));
   $('refresh').addEventListener('click', (event) => {
     run(event.currentTarget, async () => {
       await loadSummary();
+      if (document.querySelector('.tab.active')?.dataset.tab === 'economy') await loadEconomy();
       say('已刷新', 'ok');
     }, '刷新中');
   });
@@ -1324,6 +1777,16 @@ async function boot() {
   $('reward-mode').addEventListener('change', syncRewardMode);
   $('set-prefix').addEventListener('input', updatePrefixHint);
   $('new-product').addEventListener('click', () => openProduct(null));
+  $('p-type').addEventListener('change', () => syncProductType(true));
+  ['p-boost-multiplier', 'p-boost-days', 'p-boost-cap', 'p-rebate-rate', 'p-rebate-cap', 'p-rebate-cooldown'].forEach((id) => $(id).addEventListener('input', updateProductEffectSummary));
+  $('economy-refresh').addEventListener('click', (event) => run(event.currentTarget, loadEconomy, '加载中'));
+  $('save-economy').addEventListener('click', (event) => run(event.currentTarget, saveEconomy, '保存中'));
+  $('lottery-prize-add').addEventListener('click', () => addLotteryPrize());
+  $('prediction-new').addEventListener('click', openPrediction);
+  $('prediction-save').addEventListener('click', (event) => run(event.currentTarget, createPrediction, '创建中'));
+  $('prediction-cancel').addEventListener('click', closePrediction);
+  $('asset-close').addEventListener('click', closeAssets);
+  $('asset-close-top').addEventListener('click', closeAssets);
   // 筛选/排序都在前端完成：商品本来就是一次性加载的，这样点一下就有反馈、不再多打一次接口
   $('product-search').addEventListener('input', () => {
     state.productKeyword = $('product-search').value;
@@ -1442,6 +1905,10 @@ async function boot() {
     loadRedemptions,
     loadLedger,
     exportLedger,
+    loadEconomy,
+    saveEconomy,
+    openAssets,
+    parseBeijingLocal,
   };
 }
 

@@ -611,7 +611,7 @@ def render_shop(
     top_pad = max(14, int(palette.body * 0.62))
 
     def row_height(item: ProductState) -> int:
-        lines = 2 + (1 if item.product.description else 0)
+        lines = 2 + (1 if item.product.description or item.product.product_type != "normal" else 0)
         return max(thumb + 2 * top_pad, top_pad * 2 + line_body + line_small * (lines - 1))
 
     # 注意：内置的 Noto Sans CJK 不含彩色 emoji，标题里用几何字符 + 颜色区分，
@@ -747,6 +747,8 @@ def render_shop(
             meta_bits.append("不限量" if product.stock is None else f"剩余 {product.stock} 件")
             if product.per_user_limit is not None:
                 meta_bits.append(f"限购 {product.per_user_limit} · 已兑 {item.user_redeemed}")
+            if product.per_user_daily_limit is not None:
+                meta_bits.append(f"每日限购 {product.per_user_daily_limit}")
             meta = " · ".join(meta_bits)
             meta_y = y + top_pad + line_body
             draw.text(
@@ -755,10 +757,12 @@ def render_shop(
                 font=small_face,
                 fill=COLOR_MUTED,
             )
-            if product.description:
+            from .items import description as effect_description
+            shown_description = effect_description(product) or product.description
+            if shown_description:
                 draw.text(
                     (text_x, meta_y + line_small),
-                    ellipsize(small_face, product.description, right_x - text_x),
+                    ellipsize(small_face, shown_description, right_x - text_x),
                     font=small_face,
                     fill=COLOR_FAINT,
                 )
@@ -795,6 +799,9 @@ def render_shop(
             item.product.cost,
             item.product.stock,
             item.product.per_user_limit,
+            item.product.per_user_daily_limit,
+            item.product.product_type,
+            str(sorted(item.product.effect_config.items())),
             item.product.enabled,
             item.product.category,
             item.product.description,
@@ -1289,6 +1296,24 @@ def render_help(
         canvas.close()
         return path
     return save_card(_trim(canvas, palette, y), path)
+
+
+def render_economy(title: str, text: str, render_dir: str, palette: CardPalette | None = None) -> str:
+    """玩法与开奖结果卡；缓存包括完整文案，重试返回同一个开奖结果。"""
+    palette = palette or CardPalette()
+    body_face = font_for(palette.body, palette.font_path)
+    lines = []
+    for paragraph in text.splitlines():
+        lines.extend(wrap_text(body_face, paragraph, palette.content_width - 40, 12) or [""])
+    line_h = int(palette.body * 1.65)
+    canvas, draw = _new_canvas(palette.width, 220 + palette.pad * 2 + len(lines) * line_h)
+    y = _draw_header(palette, canvas, draw, title, "积分娱乐", "所有时间均为北京时间 UTC+8")
+    _rounded(draw, (palette.pad, y, palette.width-palette.pad, y+len(lines)*line_h+36), COLOR_CARD, radius=16, outline=COLOR_BORDER)
+    y += 18
+    for line in lines:
+        draw.text((palette.pad+20, y), line, font=body_face, fill=COLOR_TEXT)
+        y += line_h
+    return save_card(_trim(canvas, palette, y+20), output_path("economy", cache_fields(title, text, palette.cache_tag), render_dir))
 
 
 def shop_view_payload(view: ShopView) -> str:

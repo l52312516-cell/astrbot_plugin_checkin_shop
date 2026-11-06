@@ -1,6 +1,6 @@
 name: astrbot_plugin_checkin_shop
 display_name: 打卡积分商店
-short_desc: 每日打卡得积分，积分可在后台配置的商店里兑换商品（图文渲染）
+short_desc: 打卡积分、商品兑换与可选虚拟股市、积分通、竞猜、刮奖和道具
 description: |
   一个完整的"打卡赚积分 + 积分兑换"插件：
   * 指令：/打卡 /商店 /我的积分 /积分榜 /兑换商品 <名称> /绑定邮箱 <邮箱> /商店帮助
@@ -11,7 +11,9 @@ description: |
   * 兑换为两步确认：回复引用消息后发送 是/否，避免误操作
   * 兑换记录在后台流转（待发放 / 已发放 / 已取消，可返还积分与库存），可删除
   * 标记发放后自动通知用户：会话提示 +（可选）SMTP 发放邮件，收件邮箱可用 /绑定邮箱 绑定
-version: v1.3.0
+  * 默认关闭的积分娱乐：虚拟股市、活期积分通、奖池竞猜、刮刮乐与两类结构化道具
+  * 每日额度跨群共享，支持持久确认、离线补结算、后台玩法管理与资产查账
+version: v1.4.0
 author: AstrBot plugin community
 repo: https://github.com/l52312516-cell/astrbot_plugin_checkin_shop
 astrbot_version: ">=4.16,<5"
