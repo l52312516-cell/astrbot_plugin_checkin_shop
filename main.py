@@ -55,6 +55,7 @@ except ImportError:  # AstrBot 把 main.py 当顶层模块加载
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
 PLUGIN_VERSION = "1.4.3"
+IMAGE_ONLY_TEXT_THRESHOLD = 200
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)")
@@ -392,16 +393,29 @@ class CheckinShopPlugin(Star):
         event: AstrMessageEvent,
         text: str,
         card: Any = None,
+        *,
+        render_label: str = "",
     ):
-        """把文本和图片**合并成一条消息**发出。
+        """短文字和图片合并发送，达到 200 字时仅发送图片。
 
         Args:
             event: 当前消息事件。
             text: 文本内容；为空时不发文本。
             card: 零参出图回调（同步函数，返回图片路径）；为 None 或渲染失败时只发文本。
                 回调会被丢到工作线程里执行，不要在回调里碰事件循环对象。
+            render_label: 需要向用户反馈的图片名称；异常反馈只显示阶段和类型，不显示路径或原始数据。
         """
         path = ""
+        failure = ""
+
+        def preserve_result(result):
+            # 图片已由插件本地绘制。宿主的长文本转图会把整条消息链替换，
+            # 不能再让它处理附带的说明文字；纯文本失败诊断也应原样可见。
+            disable_t2i = getattr(result, "use_t2i", None)
+            if callable(disable_t2i):
+                disable_t2i(False)
+            return result
+
         if card is not None:
             try:
                 # 渲染是 CPU 密集的同步操作（Pillow 画图 + PNG 编码 + 落盘），直接在事件
@@ -409,16 +423,28 @@ class CheckinShopPlugin(Star):
                 path = str(
                     await asyncio.to_thread(self._render_card, card) or ""
                 )
-            except Exception:
+                if render_label and (not path or not os.path.isfile(path)):
+                    raise FileNotFoundError("renderer returned no readable image file")
+            except Exception as exc:
+                path = ""
+                failure = f"{type(exc).__name__}，阶段：绘制"
                 logger.exception("[打卡商店] 图片渲染失败，已降级为文本")
-        if path and not text:
-            yield event.image_result(path)
-            return
         if path:
-            yield event.chain_result([Plain(text), Image.fromFileSystem(path)])
-            return
+            caption = "" if len(text.strip()) >= IMAGE_ONLY_TEXT_THRESHOLD else text
+            try:
+                result = event.chain_result([Plain(caption), Image.fromFileSystem(path)]) if caption else event.image_result(path)
+                result = preserve_result(result)
+            except Exception as exc:
+                failure = f"{type(exc).__name__}，阶段：组装"
+                logger.exception("[打卡商店] 图片消息组装失败，已降级为文本")
+            else:
+                yield result
+                return
         if text:
-            yield event.plain_result(text)
+            if render_label and failure:
+                text += f"\n\n{render_label}图片生成失败（{failure}）。已显示文字行情。"
+            result = event.plain_result(text)
+            yield preserve_result(result) if card is not None else result
 
     def _render_card(self, card: Any) -> str:
         """在工作线程里出图（渲染是 CPU 密集的同步操作，别占事件循环）。
@@ -734,14 +760,19 @@ class CheckinShopPlugin(Star):
             logger.exception("[打卡商店] 玩法请求失败")
             yield event.plain_result("操作未完成，请稍后重试；积分没有扣除。")
             return
-        if section == "股市" and render_context.get('kind') == "行情":
-            card = partial(render.render_market_table, render_context['stocks'], self.store.render_dir,
-                           self._palette(), render_context['settings'])
-        else:
+        def card() -> str:
+            if section == "股市" and render_context.get('kind') == "行情":
+                return render.render_market_table(render_context['stocks'], self.store.render_dir,
+                                                  self._palette(), render_context['settings'])
             market_data = render_context.get('stocks') if render_context.get('kind') == "趋势" else None
-            card = partial(render.render_economy, "股票趋势" if market_data is not None else section,
-                           message, self.store.render_dir, self._palette(), market_data)
-        async for result in self._send(event, message, card):
+            return render.render_economy("股票趋势" if market_data is not None else section,
+                                         message, self.store.render_dir, self._palette(), market_data)
+
+        render_label = ""
+        if section == "股市":
+            kind = render_context['kind']
+            render_label = "股票趋势" if kind == "趋势" else "股票持仓" if kind == "持仓" else "股市行情"
+        async for result in self._send(event, message, card, render_label=render_label):
             yield result
 
     # AstrBot 按参数默认值优先于注解注册；GreedyStr 不可设空串默认值，

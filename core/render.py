@@ -232,9 +232,9 @@ def save_card(image: Any, path: str) -> str:
 
     Windows 下 ``os.replace`` 可能因为目标文件正被另一个线程读着而抛
     ``PermissionError``（POSIX 允许改名到打开中的文件，Windows 不允许）。
-    这不是错误，只是"读者正在读旧图"，重试几次即可；5 次都用尽时按目标是否存在
-    决定退路：已有缓存就用缓存，没有就把临时文件交出去 —— 无论哪种都返回一个
-    **真实存在**的图片，绝不返回不存在的路径。
+    这不是错误，只是"读者正在读旧图"，重试几次即可；5 次都用尽时仅复用通过
+    PNG 校验的已有缓存，否则把完整临时文件交出去 —— 无论哪种都返回一个
+    **真实存在且可读**的图片，绝不返回不存在或已损坏的路径。
 
     **一律做 256 色量化**（包括带商品照片的卡片）。曾经有过"带照片就跳过量化"的
     例外，理由是"照片量化会明显色带化"——但那个依据（缩略图区域 45% 像素偏移
@@ -260,8 +260,10 @@ def save_card(image: Any, path: str) -> str:
     try:
         # 纯界面卡片以纯色和文字为主；照片卡片经过缩略图缩放后高频细节已被抹平，
         # 量化同样几乎无损。转成索引 PNG 后体积只剩约 38%。
+        # Pillow 9.0 使用模块级常量，9.1 起同时提供 Palette 枚举。
+        adaptive_palette = getattr(Image, "Palette", Image).ADAPTIVE
         image = image.convert("RGB").convert(
-            "P", palette=Image.Palette.ADAPTIVE, colors=256
+            "P", palette=adaptive_palette, colors=256
         )
         image.save(temporary, format="PNG", optimize=True, compress_level=9)
         delay = 0.01
@@ -276,14 +278,17 @@ def save_card(image: Any, path: str) -> str:
                 delay *= 2
         # 5 次改名都失败：目标被读者占着（Windows 不允许改名到打开中的文件）。
         if os.path.isfile(path):
-            # 磁盘上已有一张完整可读的图，而且缓存键是内容哈希，内容必然一致 —— 直接用它，
-            # 同时让 finally 清掉这份用不上的临时文件。
-            # 用 isfile 而不是 exists：path 万一是目录，exists 为真但根本不是图，
-            # 交出去会让调用方拿到一个"打不开的路径"。
-            logger.debug("[打卡商店] 图片改名被占用，改用已有缓存 %s", path)
-            return path
-        # 目标还不存在（首次出图）：把这一份完整的临时文件交给调用方。
-        # 不能返回 path —— 它根本不存在，调用方会拿到"空图"。
+            # 内容哈希缓存也可能被中断写入损坏；仅复用经校验的 PNG。
+            # 不删除被占用的目标，校验失败时保留这次完整渲染的临时文件。
+            try:
+                with Image.open(path) as cached_image:
+                    if cached_image.format == "PNG":
+                        cached_image.verify()
+                        logger.debug("[打卡商店] 图片改名被占用，改用已有缓存 %s", path)
+                        return path
+            except Exception:
+                logger.debug("[打卡商店] 被占用的图片缓存不可读 %s", path, exc_info=True)
+        # 目标不存在、不是 PNG 或已损坏：把完整临时文件交给调用方。
         logger.debug("[打卡商店] 图片改名被占用，改用临时文件 %s", temporary)
         handed_over = True
         return temporary
@@ -1337,12 +1342,18 @@ def render_market_table(
         "code", "name", "price_cent", "price", "open_price_cent", "open_price",
         "last_updated", "buy_enabled", "enabled", "fee_bps",
     ))) for stock in rows]
-    payload = cache_fields("market-table-v1.4.3", palette.cache_tag, *row_keys,
+    payload = cache_fields("market-table-v1.4.3-cache-verified", palette.cache_tag, *row_keys,
                            settings.get("stocks_enabled"), settings.get("stock_fee_bps", 100),
                            settings.get("stock_daily_trades", 20), settings.get("stock_daily_buy_limit", 1000))
     path = output_path("economy", payload, render_dir)
     if os.path.isfile(path):
-        return path
+        try:
+            with Image.open(path) as cached_image:
+                if cached_image.format == "PNG":
+                    cached_image.verify()
+                    return path
+        except Exception:
+            logger.debug("[打卡商店] 行情图片缓存不可读，重新生成", exc_info=True)
 
     title_face = font_for(palette.title, palette.font_path)
     body_face = font_for(palette.body, palette.font_path)
