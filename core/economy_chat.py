@@ -71,7 +71,7 @@ def display(section: str, text: str, overview: dict, assets: dict, prefix: str) 
                     extra += " · 暂停买入，可卖出"
                 lines.append(f"{s['code']} {s['name']} · {s['price_text']} 分/股 · 日涨跌 {s['change_bps']/100:+.2f}%{extra}")
             if overview["stocks"]:
-                lines.append("报价时间：" + (format_moment(overview['stocks'][0]['last_updated']) or "尚未开市"))
+                lines.append("报价时间：" + (format_moment(overview['stocks'][0].get('last_updated')) or "尚未生成行情"))
         example_code = overview["stocks"][0]["code"] if overview.get("stocks") else "股票代码"
         lines += [f"全局默认手续费 {settings['stock_fee_bps']/100:g}%（至少1分）；单股独立费率以行情标注和确认报价为准", f"每日最多 {settings['stock_daily_trades']} 笔，买入含费最多 {settings['stock_daily_buy_limit']} 分", f"{prefix}股市 买入 {example_code} 1", f"{prefix}股市 卖出 {example_code} 1 / {prefix}股市 持仓"]
         return "\n".join(lines)

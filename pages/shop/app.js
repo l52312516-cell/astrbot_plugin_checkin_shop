@@ -1638,7 +1638,9 @@ function renderEconomyOverview() {
   const body = $('economy-stock-table').querySelector('tbody'); body.replaceChildren();
   stocks.forEach((stock) => {
     const row = document.createElement('tr');
-    row.append(textNode('td', `${stock.code || '—'} · ${stock.name || '—'}`), textNode('td', `${stockPrice(stock)} 积分`, 'num'), textNode('td', Number.isFinite(Number(stock.change_bps)) ? `${Number(stock.change_bps) > 0 ? '+' : ''}${(Number(stock.change_bps) / 100).toFixed(2)}%` : '—', 'num'), textNode('td', beijingTime(stock.last_updated)));
+    const updatedAt = Number(stock.last_updated);
+    const updateText = Number.isFinite(updatedAt) && updatedAt > 0 ? beijingTime(updatedAt) : '尚未生成行情';
+    row.append(textNode('td', `${stock.code || '—'} · ${stock.name || '—'}`), textNode('td', `${stockPrice(stock)} 积分`, 'num'), textNode('td', Number.isFinite(Number(stock.change_bps)) ? `${Number(stock.change_bps) > 0 ? '+' : ''}${(Number(stock.change_bps) / 100).toFixed(2)}%` : '—', 'num'), textNode('td', updateText));
     body.appendChild(row);
   });
   $('economy-stock-table').closest('.table-wrap').hidden = !stocks.length;

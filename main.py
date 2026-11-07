@@ -12,8 +12,6 @@
 后台：WebUI 插件页（``pages/shop``）+ 插件配置页。
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import copy
@@ -739,23 +737,25 @@ class CheckinShopPlugin(Star):
         async for result in self._send(event, message, card):
             yield result
 
+    # AstrBot 按参数默认值优先于注解注册；GreedyStr 不可设空串默认值，
+    # 否则只会收到第一个单词。GreedyStr 本身会把无参数解析为空字符串。
     @filter.command("股市")
-    async def cmd_stocks(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+    async def cmd_stocks(self, event: AstrMessageEvent, 参数: GreedyStr):
         async for result in self._economy_command(event, "股市", 参数):
             yield result
 
     @filter.command("积分通")
-    async def cmd_savings(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+    async def cmd_savings(self, event: AstrMessageEvent, 参数: GreedyStr):
         async for result in self._economy_command(event, "积分通", 参数):
             yield result
 
     @filter.command("竞猜")
-    async def cmd_predictions(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+    async def cmd_predictions(self, event: AstrMessageEvent, 参数: GreedyStr):
         async for result in self._economy_command(event, "竞猜", 参数):
             yield result
 
     @filter.command("刮刮乐")
-    async def cmd_lottery(self, event: AstrMessageEvent, 参数: GreedyStr = ""):
+    async def cmd_lottery(self, event: AstrMessageEvent, 参数: GreedyStr):
         async for result in self._economy_command(event, "刮刮乐", 参数):
             yield result
 
@@ -963,7 +963,7 @@ class CheckinShopPlugin(Star):
             yield result
 
     @filter.command("绑定邮箱", alias={"我的邮箱"})
-    async def cmd_bind_email(self, event: AstrMessageEvent, 邮箱: GreedyStr = ""):
+    async def cmd_bind_email(self, event: AstrMessageEvent, 邮箱: GreedyStr):
         """绑定邮箱：设置接收兑换发放邮件的收件地址。
 
         用法：``绑定邮箱 123@qq.com`` 绑定；``绑定邮箱`` 查看；``绑定邮箱 解绑`` 清除
@@ -1052,7 +1052,7 @@ class CheckinShopPlugin(Star):
             yield result
 
     @filter.command("兑换商品", alias={"兑换"})
-    async def cmd_redeem(self, event: AstrMessageEvent, 商品名: GreedyStr = ""):
+    async def cmd_redeem(self, event: AstrMessageEvent, 商品名: GreedyStr):
         """兑换商品：不带参数列编号菜单，带编号（或商品名）给出确认提示。
 
         用法：``兑换商品``（列出编号）、``兑换 2``（按编号兑换）、
