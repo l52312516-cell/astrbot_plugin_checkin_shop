@@ -575,7 +575,7 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
         (cmd("积分榜"), f"查看本平台积分排行（别名 {cmd('排行榜')}）"),
     ]
     if enabled["stocks"]:
-        commands.append((cmd("股市"), "查看虚构行情、持仓；买入/卖出 股票代码 股数"))
+        commands.append((cmd("股市"), "查看行情表；趋势 [股票代码]、持仓；买入/卖出 股票代码 [股数]，省略股数为1"))
     if enabled["savings"]:
         commands.append((cmd("积分通"), "查看活期账户；存入/取出 积分数"))
     if enabled["predictions"]:

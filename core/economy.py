@@ -182,6 +182,13 @@ def _money(cents: int) -> str:
     return f"{cents // 100}.{cents % 100:02d}"
 
 
+def price_change_bps(price: int, opening: int) -> int:
+    """涨跌幅展示为百分比两位小数，正负均按绝对值四舍五入。"""
+    difference = price - opening
+    rounded = (abs(difference) * 20000 + opening) // (opening * 2)
+    return -rounded if difference < 0 else rounded
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -464,7 +471,7 @@ def _public_stocks(economy: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"code": stock["code"], "name": stock["name"], "price": stock["price"],
              "price_cent": stock["price"], "price_text": _money(stock["price"]),
              "open_price": stock["open_price"], "open_price_cent": stock["open_price"],
-             "change_bps": (stock["price"] - stock["open_price"]) * 10000 // stock["open_price"],
+             "change_bps": price_change_bps(stock["price"], stock["open_price"]),
              "last_updated": stock["last_updated"], "buy_enabled": stock.get("buy_enabled", True),
              "enabled": stock.get("enabled", True), "initial_price_cent": stock.get("initial_price_cent", stock["price"]),
              "hourly_bps": stock.get("hourly_bps"), "daily_bps": stock.get("daily_bps"),
@@ -869,4 +876,4 @@ def execute_action(data: dict[str, Any], user_key: str, action: str, params: dic
 
 __all__ = ["EconomyError", "default_economy", "ensure", "daily", "settle_due", "update_settings",
            "overview", "user_assets", "prepare_action", "execute_action", "create_prediction", "resolve_prediction",
-           "upsert_stock", "delete_stock"]
+           "upsert_stock", "delete_stock", "price_change_bps"]

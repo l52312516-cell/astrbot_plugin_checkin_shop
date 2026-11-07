@@ -27,9 +27,11 @@ from typing import Any, Callable, Iterable
 try:  # 作为包被导入（测试）
     from . import business
     from .business import HelpView, ProductState, ShopView
+    from .economy import price_change_bps
 except ImportError:  # pragma: no cover - AstrBot 以顶层模块方式加载 core/
     import business  # type: ignore[no-redef]
     from business import HelpView, ProductState, ShopView  # type: ignore[no-redef]
+    from economy import price_change_bps  # type: ignore[no-redef]
 
 # 上架规范：日志记录器必须且只能从 astrbot.api 导入，严禁使用内置 logging 模块。
 # 单元测试环境没有 AstrBot，由 tests/conftest.py 提供 astrbot.api 的最小替身。
@@ -1296,6 +1298,151 @@ def render_help(
     if os.path.exists(path):
         canvas.close()
         return path
+    return save_card(_trim(canvas, palette, y), path)
+
+
+def _market_quote(stock: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    """从整数报价计算六列表的数值；百分比按绝对值半入到两位小数。"""
+    price = stock.get("price_cent", stock.get("price"))
+    opened = stock.get("open_price_cent", stock.get("open_price"))
+
+    def money(value: int, signed: bool = False) -> str:
+        sign = "-" if value < 0 else "+" if signed and value > 0 else ""
+        whole, fraction = divmod(abs(value), 100)
+        return f"{sign}{whole}.{fraction:02d}"
+
+    price_text = money(price) if type(price) is int and price > 0 else "—"
+    open_text = money(opened) if type(opened) is int and opened > 0 else "—"
+    if price_text == "—" or open_text == "—":
+        return open_text, price_text, "—", "—", COLOR_MUTED
+    delta = price - opened
+    hundredths = abs(price_change_bps(price, opened))
+    sign = "+" if delta > 0 else "-" if delta < 0 else ""
+    percentage = f"{sign}{hundredths // 100}.{hundredths % 100:02d}%"
+    color = "#c2414a" if delta > 0 else COLOR_ACCENT if delta < 0 else COLOR_MUTED
+    return open_text, price_text, money(delta, signed=True), percentage, color
+
+
+def render_market_table(
+    stocks: list[dict[str, Any]],
+    render_dir: str,
+    palette: CardPalette | None = None,
+    settings: dict[str, Any] | None = None,
+) -> str:
+    """绘制代码、名称、开盘、现价、涨跌、涨跌幅的真实行情表。"""
+    palette = palette or CardPalette()
+    settings = settings or {}
+    rows = [stock for stock in stocks if isinstance(stock, dict)]
+    row_keys = [cache_fields(*(stock.get(key) for key in (
+        "code", "name", "price_cent", "price", "open_price_cent", "open_price",
+        "last_updated", "buy_enabled", "enabled", "fee_bps",
+    ))) for stock in rows]
+    payload = cache_fields("market-table-v1.4.3", palette.cache_tag, *row_keys,
+                           settings.get("stocks_enabled"), settings.get("stock_fee_bps", 100),
+                           settings.get("stock_daily_trades", 20), settings.get("stock_daily_buy_limit", 1000))
+    path = output_path("economy", payload, render_dir)
+    if os.path.isfile(path):
+        return path
+
+    title_face = font_for(palette.title, palette.font_path)
+    body_face = font_for(palette.body, palette.font_path)
+    note_face = font_for(palette.small, palette.font_path)
+    row_h = max(int(palette.body * 2.4), 44)
+    heading_h = max(int(palette.body * 2.1), 40)
+    note_h = max(int(palette.small * 1.55), 24)
+    inset = max(14, palette.pad // 2)
+    left, right = palette.pad + inset, palette.width - palette.pad - inset
+    usable = right - left
+    column_edges = [left + int(usable * ratio) for ratio in (0, .14, .40, .55, .70, .84, 1)]
+    gap = max(6, palette.base // 3)
+
+    example = str(rows[0].get("code", "股票代码")) if rows else "股票代码"
+    footer = [
+        "单位：积分/股 · 涨跌以当日开盘为基准 · 每小时整点生成行情",
+        f"{palette.command('股市 买入')} {example} [股数] · 省略股数默认为 1 股",
+        f"{palette.command('股市 趋势')} [代码] · {palette.command('股市 持仓')}",
+    ]
+    fee = settings.get("stock_fee_bps", 100)
+    footer.append(f"默认买卖手续费 {fee / 100:g}%（至少 1 分）；确认时显示实际费用")
+    if settings.get("stocks_enabled") is False:
+        footer.append("股市买入未开启；已有持仓仍可按规则卖出。")
+    if any(stock.get("buy_enabled") is False or stock.get("enabled") is False for stock in rows):
+        footer.append("名称后的 * 表示暂停买入；已有持仓仍可卖出。")
+    individual_fees = [f"{stock.get('code', '—')} {stock['fee_bps'] / 100:g}%"
+                       for stock in rows if stock.get("fee_bps") is not None]
+    if individual_fees:
+        footer.append("独立手续费：" + " / ".join(individual_fees))
+    foot_lines = []
+    for line in footer:
+        foot_lines.extend(wrap_text(note_face, line, palette.content_width - inset * 2, max_lines=30))
+
+    timestamps = []
+    for stock in rows:
+        try:
+            timestamp = float(stock.get("last_updated") or 0)
+            if timestamp > 0:
+                label = business.format_moment(timestamp)
+                if label:
+                    timestamps.append((timestamp, label))
+        except (TypeError, ValueError, OverflowError, OSError):
+            continue
+    latest = max(timestamps)[1] if timestamps else "尚未生成行情"
+    time_line = f"最近行情：{latest} · 北京时间 UTC+8"
+    time_lines = wrap_text(note_face, time_line, palette.content_width, max_lines=2)
+    title_h = int(palette.title * 1.5)
+    table_top = palette.pad + title_h + (len(time_lines) + 1) * note_h + palette.gap
+    table_height = heading_h + (len(rows) * row_h if rows else row_h * 2)
+    bottom = table_top + table_height + palette.gap_l + len(foot_lines) * note_h
+    canvas, draw = _new_canvas(palette.width, bottom + palette.pad * 2)
+
+    def fit_face(text: str, maximum: int, base_face: Any, numeric: bool = False) -> tuple[Any, str]:
+        face = base_face
+        minimum = 6 if numeric else max(11, int(base_face.size * .65))
+        for size in range(base_face.size - 1, minimum - 1, -1):
+            if text_width(face, text) <= maximum:
+                break
+            face = font_for(size, palette.font_path)
+        return face, ellipsize(face, text, maximum)
+
+    def center(text: str, top: int, face: Any, color: str) -> None:
+        draw.text(((palette.width - text_width(face, text)) // 2, top), text, font=face, fill=color)
+
+    center("股票行情", palette.pad, title_face, COLOR_TEXT)
+    y = palette.pad + title_h
+    center("虚构积分行情 · " + ("买入未开启" if settings.get("stocks_enabled") is False else f"{len(rows)} 只股票"), y, note_face, COLOR_ACCENT)
+    y += note_h
+    for line in time_lines:
+        center(line, y, note_face, COLOR_MUTED)
+        y += note_h
+    _rounded(draw, (palette.pad, table_top, palette.width - palette.pad, table_top + table_height), COLOR_CARD, radius=palette.radius, outline=COLOR_BORDER)
+    headers = ("代码", "名称", "开盘", "现价", "涨跌", "涨跌幅")
+    for index, label in enumerate(headers):
+        x = column_edges[index] if index < 2 else column_edges[index + 1] - gap - text_width(note_face, label)
+        draw.text((x, _vcenter(note_face, table_top, heading_h)), label, font=note_face, fill=COLOR_MUTED)
+    draw.line((left, table_top + heading_h, right, table_top + heading_h), fill=COLOR_BORDER, width=palette.line)
+
+    if not rows:
+        center("暂无股票，请在后台添加股票后查看", table_top + heading_h + row_h // 2, note_face, COLOR_MUTED)
+    for index, stock in enumerate(rows):
+        row_top = table_top + heading_h + index * row_h
+        if index:
+            draw.line((left, row_top, right, row_top), fill=COLOR_GRID, width=1)
+        open_text, price_text, delta_text, percent_text, movement_color = _market_quote(stock)
+        paused = stock.get("buy_enabled") is False or stock.get("enabled") is False
+        cells = (str(stock.get("code", "—")), str(stock.get("name", "—")) + (" *" if paused else ""),
+                 open_text, price_text, delta_text, percent_text)
+        for column, value in enumerate(cells):
+            maximum = column_edges[column + 1] - column_edges[column] - gap
+            face, label = fit_face(value, maximum, body_face, numeric=column >= 2)
+            if column == 1 and paused:
+                label = ellipsize(face, str(stock.get("name", "—")), maximum - text_width(face, " *")) + " *"
+            x = column_edges[column] if column < 2 else column_edges[column + 1] - gap - text_width(face, label)
+            color = COLOR_ACCENT if column == 0 else movement_color if column >= 4 else COLOR_TEXT
+            draw.text((x, _vcenter(face, row_top, row_h)), label, font=face, fill=color)
+    y = table_top + table_height + palette.gap_l
+    for line in foot_lines:
+        draw.text((left, y), line, font=note_face, fill=COLOR_MUTED)
+        y += note_h
     return save_card(_trim(canvas, palette, y), path)
 
 

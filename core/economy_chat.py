@@ -5,6 +5,7 @@ from datetime import date
 import re
 
 from .items import integer
+from .economy import price_change_bps
 from .timeutil import format_moment
 
 
@@ -30,9 +31,10 @@ def _parts(section: str, text: str) -> list[str]:
 def parse(section: str, text: str) -> tuple[str, dict] | None:
     parts = _parts(section, text)
     if section == "股市" and parts and parts[0] in ("买入", "卖出"):
-        if len(parts) != 3:
-            raise ValueError("用法：股市 买入/卖出 ST01 股数")
-        return ("stock_buy" if parts[0] == "买入" else "stock_sell", {"code": parts[1].upper(), "quantity": integer(parts[2], "股数", 1)})
+        if len(parts) not in (2, 3):
+            raise ValueError("用法：股市 买入/卖出 股票代码 [股数]；省略股数时按 1 股确认")
+        quantity = integer(parts[2], "股数", 1) if len(parts) == 3 else 1
+        return ("stock_buy" if parts[0] == "买入" else "stock_sell", {"code": parts[1].upper(), "quantity": quantity})
     if section == "积分通" and parts:
         if len(parts) != 2 or parts[0] not in ("存入", "取出"):
             raise ValueError("用法：积分通 存入/取出 积分数；不带参数查看账户")
@@ -45,18 +47,51 @@ def parse(section: str, text: str) -> tuple[str, dict] | None:
         if parts != ["购买"]:
             raise ValueError("用法：刮刮乐 购买；不带参数查看奖表")
         return "lottery_buy", {}
-    if section == "股市" and parts and parts[0] not in ("行情", "持仓"):
-        raise ValueError("用法：股市 行情/持仓，或 股市 买入/卖出 ST01 股数")
-    if section == "股市" and len(parts) > 1:
-        raise ValueError("查看行情或持仓时无需其他参数")
+    if section == "股市":
+        _stock_view_args(parts)
     return None
+
+
+def _stock_view_args(parts: list[str]) -> tuple[str, str | None]:
+    """校验只读入口语法；股票存在性由拿到实际行情后再检查。"""
+    if not parts:
+        return "行情", None
+    if parts[0] == "趋势":
+        if len(parts) > 2:
+            raise ValueError("用法：股市 趋势 [股票代码]；不填代码查看全部股票")
+        return "趋势", parts[1].upper() if len(parts) == 2 else None
+    if parts[0] in ("行情", "持仓"):
+        if len(parts) > 1:
+            raise ValueError("查看行情或持仓时无需其他参数；单股趋势请用：股市 趋势 股票代码")
+        return parts[0], None
+    raise ValueError("用法：股市 行情/持仓、股市 趋势 [股票代码]，或 股市 买入/卖出 股票代码 [股数]")
+
+
+def stock_view(text: str, stocks: list[dict]) -> tuple[str, list[dict]]:
+    """返回行情/趋势/持仓入口和实际选中的股票，供文字及图片使用。"""
+    kind, code = _stock_view_args(_parts("股市", text))
+    selected = list(stocks)
+    if code is not None:
+        selected = [stock for stock in stocks if str(stock.get("code", "")).upper() == code]
+        if not selected:
+            raise ValueError(f"股票代码 {code} 不存在，请先查看股市行情中的实际代码")
+    return kind, selected
+
+
+def _stock_price_text(value: object, signed: bool = False) -> str:
+    if type(value) is not int:
+        return "—"
+    sign = "-" if value < 0 else "+" if value > 0 and signed else ""
+    absolute = abs(value)
+    return f"{sign}{absolute // 100}.{absolute % 100:02d}"
 
 
 def display(section: str, text: str, overview: dict, assets: dict, prefix: str) -> str:
     settings = overview["settings"]
     text = " ".join(_parts(section, text))
     if section == "股市":
-        if text.strip() == "持仓":
+        view_kind, selected_stocks = stock_view(text, overview.get("stocks", []))
+        if view_kind == "持仓":
             lines = ["我的股票持仓"]
             for p in assets["positions"]:
                 if p["quantity"]:
@@ -64,16 +99,24 @@ def display(section: str, text: str, overview: dict, assets: dict, prefix: str) 
             if len(lines) == 1:
                 lines.append("暂无持仓")
         else:
-            lines = ["虚构股市" + ("（买入未开启）" if not settings["stocks_enabled"] else "")]
-            for s in overview["stocks"]:
+            title = "股票趋势" if view_kind == "趋势" else "虚构股市"
+            lines = [title + ("（买入未开启）" if not settings["stocks_enabled"] else "")]
+            for s in selected_stocks:
                 extra = f" · 手续费 {s['fee_bps']/100:g}%" if s.get('fee_bps') is not None else ""
                 if s.get('buy_enabled') is False:
                     extra += " · 暂停买入，可卖出"
-                lines.append(f"{s['code']} {s['name']} · {s['price_text']} 分/股 · 日涨跌 {s['change_bps']/100:+.2f}%{extra}")
-            if overview["stocks"]:
-                lines.append("报价时间：" + (format_moment(overview['stocks'][0].get('last_updated')) or "尚未生成行情"))
+                price = s.get('price_cent', s.get('price'))
+                opening = s.get('open_price_cent', s.get('open_price'))
+                difference = price - opening if type(price) is int and type(opening) is int else None
+                current_text = s.get('price_text', _stock_price_text(price))
+                change_bps = price_change_bps(price, opening) if type(price) is int and type(opening) is int and opening > 0 else s['change_bps']
+                lines.append(f"{s['code']} {s['name']} · 开盘 {_stock_price_text(opening)} · 现价 {current_text} 分/股 · 涨跌 {_stock_price_text(difference, signed=True)} · 日涨跌 {change_bps/100:+.2f}%{extra}")
+            if selected_stocks:
+                lines.append("报价时间：" + (format_moment(selected_stocks[0].get('last_updated')) or "尚未生成行情"))
+            else:
+                lines.append("暂无股票，请管理员在玩法管理中配置")
         example_code = overview["stocks"][0]["code"] if overview.get("stocks") else "股票代码"
-        lines += [f"全局默认手续费 {settings['stock_fee_bps']/100:g}%（至少1分）；单股独立费率以行情标注和确认报价为准", f"每日最多 {settings['stock_daily_trades']} 笔，买入含费最多 {settings['stock_daily_buy_limit']} 分", f"{prefix}股市 买入 {example_code} 1", f"{prefix}股市 卖出 {example_code} 1 / {prefix}股市 持仓"]
+        lines += [f"全局默认手续费 {settings['stock_fee_bps']/100:g}%（至少1分）；单股独立费率以行情标注和确认报价为准", f"每日最多 {settings['stock_daily_trades']} 笔，买入含费最多 {settings['stock_daily_buy_limit']} 分", f"{prefix}股市 行情 / {prefix}股市 趋势 {example_code} / {prefix}股市 持仓", f"{prefix}股市 买入 {example_code} 1", f"{prefix}股市 卖出 {example_code} 1（省略股数默认 1 股，交易仍需引用确认）"]
         return "\n".join(lines)
     if section == "积分通":
         account = assets["savings"]

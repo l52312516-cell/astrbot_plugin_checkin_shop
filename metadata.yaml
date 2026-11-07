@@ -13,7 +13,7 @@ description: |
   * 标记发放后自动通知用户：会话提示 +（可选）SMTP 发放邮件，收件邮箱可用 /绑定邮箱 绑定
   * 默认关闭的积分娱乐：虚拟股市、活期积分通、奖池竞猜、刮刮乐与两类结构化道具
   * 每日额度跨群共享，支持持久确认、离线补结算、后台玩法管理与资产查账
-version: v1.4.0
+version: v1.4.3
 author: AstrBot plugin community
 repo: https://github.com/l52312516-cell/astrbot_plugin_checkin_shop
 astrbot_version: ">=4.16,<5"

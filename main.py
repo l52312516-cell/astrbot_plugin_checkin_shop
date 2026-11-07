@@ -54,7 +54,7 @@ except ImportError:  # AstrBot 把 main.py 当顶层模块加载
     from core.store import Store, default_data  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
-PLUGIN_VERSION = "1.4.0"
+PLUGIN_VERSION = "1.4.3"
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,id=(-?\d+)")
@@ -722,7 +722,9 @@ class CheckinShopPlugin(Star):
                 info = economy.overview(data, now)
                 assets = economy.user_assets(data, user_key, now)
                 assets['business_date'] = items.today(data, now)
-                render_context['stocks'] = info['stocks']
+                if section == "股市":
+                    kind, selected = economy_chat.stock_view(str(text or ""), info['stocks'])
+                    render_context.update(kind=kind, stocks=selected, settings=info['settings'])
                 return economy_chat.display(section, str(text or ""), info, assets, business.display_prefix(data.get("settings")))
             message = await self.store.mutate(view, self._seed())
         except ValueError as exc:
@@ -732,8 +734,13 @@ class CheckinShopPlugin(Star):
             logger.exception("[打卡商店] 玩法请求失败")
             yield event.plain_result("操作未完成，请稍后重试；积分没有扣除。")
             return
-        market_data = render_context.get('stocks') if section == "股市" and message.startswith("虚构股市") else None
-        card = partial(render.render_economy, section, message, self.store.render_dir, self._palette(), market_data)
+        if section == "股市" and render_context.get('kind') == "行情":
+            card = partial(render.render_market_table, render_context['stocks'], self.store.render_dir,
+                           self._palette(), render_context['settings'])
+        else:
+            market_data = render_context.get('stocks') if render_context.get('kind') == "趋势" else None
+            card = partial(render.render_economy, "股票趋势" if market_data is not None else section,
+                           message, self.store.render_dir, self._palette(), market_data)
         async for result in self._send(event, message, card):
             yield result
 
