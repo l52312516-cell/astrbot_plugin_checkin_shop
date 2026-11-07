@@ -100,7 +100,7 @@ def eligibility(data: dict, product: Any, user_key: str, now: float) -> str:
     if kind == "checkin_boost":
         boost = cards.get("boost", {})
         if boost and boost.get("end_date", "") > today(data, now):
-            return "已有待生效或生效中的签到卡"
+            return "已有生效中的签到卡"
     else:
         cooldown = product.effect_config.get("cooldown_hours", 168) * 3600
         # 冷却使用购买时保存的到期时间，改规则不能缩短已接受的冷却。
@@ -118,7 +118,7 @@ def eligibility(data: dict, product: Any, user_key: str, now: float) -> str:
 def description(product: Any, wallet: int | None = None) -> str:
     effect = product.effect_config
     if product.product_type == "checkin_boost":
-        return f"次日起 {effect.get('days', 7)} 个业务日基础签到 {effect.get('multiplier_bps', 20000) / 10000:g} 倍，每日额外最多 {effect.get('daily_bonus_cap', 20)} 分；不含连签奖励，不叠加。"
+        return f"即日起 {effect.get('days', 7)} 个业务日基础签到 {effect.get('multiplier_bps', 20000) / 10000:g} 倍，每日额外最多 {effect.get('daily_bonus_cap', 20)} 分；不含连签奖励，不叠加。"
     if product.product_type == "balance_rebate":
         text = f"按扣费前可用余额 {effect.get('rebate_bps', 1500) / 100:g}% 返还，最多 {effect.get('rebate_cap', 350)} 分；冷却 {effect.get('cooldown_hours', 168)} 小时。"
         if wallet is not None:
@@ -140,10 +140,10 @@ def apply_purchase(data: dict, product: Any, user_key: str, now: float, record_i
     usage.setdefault("families", {})[kind] = usage.setdefault("families", {}).get(kind, 0) + 1
     cards = econ.setdefault("cards", {}).setdefault(user_key, {})
     if kind == "checkin_boost":
-        start = date.fromisoformat(today(data, now)) + timedelta(days=1)
+        start = date.fromisoformat(today(data, now))
         end = start + timedelta(days=product.effect_config["days"])
         cards["boost"] = {**copy.deepcopy(product.effect_config), "start_date": start.isoformat(), "end_date": end.isoformat(), "record_id": record_id}
-        return f"签到增益已发放：{start.isoformat()} 起生效，至 {end.isoformat()} 重置时结束。"
+        return f"签到增益已发放：即日起生效，至 {end.isoformat()} 重置时结束。"
     amount = rebate(product, before)
     user = data["users"][user_key]
     integer(user["points"] + amount, "返利后余额")

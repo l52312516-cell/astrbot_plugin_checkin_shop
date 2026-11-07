@@ -21,6 +21,7 @@ import os
 import re
 import tempfile
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Iterable
 
 try:  # 作为包被导入（测试）
@@ -1298,22 +1299,135 @@ def render_help(
     return save_card(_trim(canvas, palette, y), path)
 
 
-def render_economy(title: str, text: str, render_dir: str, palette: CardPalette | None = None) -> str:
-    """玩法与开奖结果卡；缓存包括完整文案，重试返回同一个开奖结果。"""
+def render_economy(
+    title: str,
+    text: str,
+    render_dir: str,
+    palette: CardPalette | None = None,
+    market_data: list[dict[str, Any]] | None = None,
+) -> str:
+    """玩法与开奖结果卡；行情卡可附带真实保存的历史趋势。"""
     palette = palette or CardPalette()
     body_face = font_for(palette.body, palette.font_path)
     lines = []
     for paragraph in text.splitlines():
         lines.extend(wrap_text(body_face, paragraph, palette.content_width - 40, 12) or [""])
     line_h = int(palette.body * 1.65)
-    canvas, draw = _new_canvas(palette.width, 220 + palette.pad * 2 + len(lines) * line_h)
+    legend_height = font_for(palette.small, palette.font_path).size + 14
+    chart_height = (
+        max(300, int(palette.width * 0.38), 122 + len(market_data) * legend_height)
+        if market_data is not None else 0
+    )
+    chart_gap = palette.gap if chart_height else 0
+    canvas, draw = _new_canvas(palette.width, 220 + palette.pad * 2 + chart_height + chart_gap + len(lines) * line_h)
     y = _draw_header(palette, canvas, draw, title, "积分娱乐", "所有时间均为北京时间 UTC+8")
+    if market_data is not None:
+        y = _draw_market_chart(palette, draw, y, chart_height, market_data)
+        y += chart_gap
     _rounded(draw, (palette.pad, y, palette.width-palette.pad, y+len(lines)*line_h+36), COLOR_CARD, radius=16, outline=COLOR_BORDER)
     y += 18
     for line in lines:
         draw.text((palette.pad+20, y), line, font=body_face, fill=COLOR_TEXT)
         y += line_h
-    return save_card(_trim(canvas, palette, y+20), output_path("economy", cache_fields(title, text, palette.cache_tag), render_dir))
+    market_key = "" if market_data is None else cache_fields(
+        *(
+            cache_fields(stock.get("code"), stock.get("name"), stock.get("history", []))
+            for stock in market_data
+        )
+    )
+    return save_card(_trim(canvas, palette, y+20), output_path("economy", cache_fields(title, text, market_key, palette.cache_tag), render_dir))
+
+
+def _draw_market_chart(
+    palette: CardPalette,
+    draw: Any,
+    top: int,
+    height: int,
+    stocks: list[dict[str, Any]],
+) -> int:
+    """画最近 169 个真实小时快照；不同股票按首个点归一化为相对走势。"""
+    box = (palette.pad, top, palette.width - palette.pad, top + height)
+    _rounded(draw, box, COLOR_CARD, radius=16, outline=COLOR_BORDER)
+    title_face = font_for(palette.section, palette.font_path)
+    small_face = font_for(palette.small, palette.font_path)
+    draw.text((box[0] + 22, top + 16), "近 7 日行情趋势（每小时）", font=title_face, fill=COLOR_TEXT)
+
+    series: list[tuple[dict[str, Any], list[tuple[int, int]]]] = []
+    for stock in stocks:
+        history = stock.get("history") if isinstance(stock, dict) else None
+        points = []
+        if isinstance(history, list):
+            for row in history[-169:]:
+                if not isinstance(row, dict):
+                    continue
+                hour, price = row.get("hour"), row.get("price", row.get("price_cent"))
+                if type(hour) is int and type(price) is int and price > 0:
+                    points.append((hour, price))
+        if points:
+            series.append((stock, points))
+
+    plot_left = box[0] + 64
+    plot_top = top + 70
+    plot_right = box[2] - max(190, int(palette.content_width * 0.23))
+    plot_bottom = box[3] - 46
+    if plot_right - plot_left < 100:
+        plot_right = box[2] - 28
+    if not series:
+        note = "暂无历史行情，开始生成整点行情后会显示趋势"
+        draw.text((box[0] + 30, top + height // 2), note, font=small_face, fill=COLOR_MUTED)
+        return box[3]
+
+    normalized: list[tuple[dict[str, Any], list[tuple[int, float]], str]] = []
+    colors = (COLOR_ACCENT, COLOR_OK, "#db2777", "#d97706", "#0891b2", "#7c3aed")
+    all_changes: list[float] = []
+    for index, (stock, points) in enumerate(series):
+        first = points[0][1]
+        values = [(hour, (price - first) * 100.0 / first) for hour, price in points]
+        all_changes.extend(change for _, change in values)
+        normalized.append((stock, values, colors[index % len(colors)]))
+    minimum, maximum = min(all_changes), max(all_changes)
+    if maximum - minimum < 0.25:
+        center = (maximum + minimum) / 2
+        minimum, maximum = center - 0.5, center + 0.5
+    padding = max(0.25, (maximum - minimum) * 0.1)
+    minimum -= padding
+    maximum += padding
+    hours = [hour for _stock, points in series for hour, _price in points]
+    first_hour, last_hour = min(hours), max(hours)
+
+    def point_xy(hour: int, change: float) -> tuple[int, int]:
+        x = plot_left if last_hour == first_hour else int(plot_left + (hour - first_hour) * (plot_right - plot_left) / (last_hour - first_hour))
+        y = int(plot_bottom - (change - minimum) * (plot_bottom - plot_top) / (maximum - minimum))
+        return x, y
+
+    for step in range(5):
+        fraction = step / 4
+        y = int(plot_top + fraction * (plot_bottom - plot_top))
+        draw.line((plot_left, y, plot_right, y), fill=COLOR_GRID, width=1)
+        value = maximum - fraction * (maximum - minimum)
+        label = f"{value:+.1f}%"
+        draw.text((box[0] + 8, y - small_face.size // 2), label, font=small_face, fill=COLOR_FAINT)
+
+    for index, (stock, values, color) in enumerate(normalized):
+        coords = [point_xy(hour, change) for hour, change in values]
+        if len(coords) > 1:
+            draw.line(coords, fill=color, width=max(3, palette.line * 2), joint="curve")
+        x, y = coords[-1]
+        radius = max(4, palette.line * 2)
+        draw.ellipse((x-radius, y-radius, x+radius, y+radius), fill=color)
+        latest = values[-1][1]
+        legend_y = top + 76 + index * (small_face.size + 14)
+        draw.line((plot_right + 22, legend_y + small_face.size // 2, plot_right + 42, legend_y + small_face.size // 2), fill=color, width=4)
+        label = f"{stock.get('code', '')} {stock.get('name', '')} {latest:+.2f}%"
+        draw.text((plot_right + 50, legend_y), ellipsize(small_face, label, box[2] - plot_right - 58), font=small_face, fill=COLOR_TEXT)
+
+    if hours:
+        first_time = datetime.fromtimestamp(min(hours) * 3600, timezone(timedelta(hours=8))).strftime("%m-%d %H:%M")
+        last_time = datetime.fromtimestamp(max(hours) * 3600, timezone(timedelta(hours=8))).strftime("%m-%d %H:%M")
+        draw.text((plot_left, plot_bottom + 8), first_time, font=small_face, fill=COLOR_FAINT)
+        right_text = last_time
+        draw.text((plot_right - text_width(small_face, right_text), plot_bottom + 8), right_text, font=small_face, fill=COLOR_FAINT)
+    return box[3]
 
 
 def shop_view_payload(view: ShopView) -> str:

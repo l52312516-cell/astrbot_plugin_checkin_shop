@@ -638,6 +638,32 @@ async def economy_predictions_resolve(plugin) -> Any:
     return await _economy_transaction(plugin, handler)
 
 
+async def economy_stocks_list(plugin) -> Any:
+    now = time.time()
+    def handler(data: dict[str, Any]) -> dict[str, Any]:
+        view = economy.overview(data, now)
+        return {"stocks": view.get("stocks", [])}
+    return await _economy_transaction(plugin, handler)
+
+
+async def economy_stocks_upsert(plugin) -> Any:
+    payload = await request.json(default={})
+    if not isinstance(payload, dict):
+        return error_response("请求内容必须是 JSON 对象", status_code=400)
+    now = time.time()
+    return await _economy_transaction(plugin, lambda data: {
+        "stock": economy.upsert_stock(data, payload, now), "message": "股票已保存"})
+
+
+async def economy_stocks_delete(plugin) -> Any:
+    payload = await request.json(default={})
+    if not isinstance(payload, dict):
+        return error_response("请求内容必须是 JSON 对象", status_code=400)
+    now = time.time()
+    return await _economy_transaction(plugin, lambda data: {
+        "message": economy.delete_stock(data, payload, now)})
+
+
 # ------------------------------------------------------------------ 账单流水
 
 
@@ -734,6 +760,9 @@ class DashboardAPI:
             (f"/{PLUGIN_ID}/shop/economy/overview", economy_overview, ["GET"], "打卡商店：经济管理概览"),
             (f"/{PLUGIN_ID}/shop/economy/settings", economy_settings_save, ["POST"], "打卡商店：保存经济设置"),
             (f"/{PLUGIN_ID}/shop/economy/user", economy_user, ["POST"], "打卡商店：查询用户资产"),
+            (f"/{PLUGIN_ID}/shop/economy/stocks", economy_stocks_list, ["GET"], "打卡商店：股票列表"),
+            (f"/{PLUGIN_ID}/shop/economy/stocks/upsert", economy_stocks_upsert, ["POST"], "打卡商店：保存股票"),
+            (f"/{PLUGIN_ID}/shop/economy/stocks/delete", economy_stocks_delete, ["POST"], "打卡商店：删除股票"),
             (f"/{PLUGIN_ID}/shop/economy/predictions/create", economy_predictions_create, ["POST"], "打卡商店：创建竞猜"),
             (f"/{PLUGIN_ID}/shop/economy/predictions/resolve", economy_predictions_resolve, ["POST"], "打卡商店：结算或作废竞猜"),
             (f"/{PLUGIN_ID}/shop/ledger", ledger_list, ["POST"], "打卡商店：账单流水"),

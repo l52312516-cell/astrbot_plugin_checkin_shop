@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import random
+import re
 import secrets
 import uuid
 from datetime import datetime
@@ -29,6 +30,7 @@ INTEREST_DENOMINATOR = 10_000 * 86_400 * 1_000_000
 STOCKS = {
     "ST01": "星河科技", "ST02": "喵喵食品", "ST03": "云海能源", "ST04": "像素娱乐",
 }
+_STOCK_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,11}$")
 TERMINAL = {"resolved", "cancelled", "void"}
 DEFAULT_SETTINGS: dict[str, Any] = {
     "stocks_enabled": False, "savings_enabled": False, "predictions_enabled": False,
@@ -56,13 +58,20 @@ def default_economy() -> dict[str, Any]:
         "market": {
             "seed": secrets.token_hex(32), "last_hour": None,
             "stocks": {
-                code: {"code": code, "name": name, "price": 10000, "open_price": 10000,
-                       "date": "", "last_updated": 0, "history": []}
+                code: _default_stock(code, name, 10000)
                 for code, name in STOCKS.items()
             },
+            "removed_stocks": [],
         },
         "positions": {}, "predictions": {}, "daily_usage": {}, "cards": {}, "operations": {},
     }
+
+
+def _default_stock(code: str, name: str, price: int) -> dict[str, Any]:
+    return {"code": code, "name": name, "price": price, "open_price": price,
+            "date": "", "last_updated": 0, "history": [], "buy_enabled": True,
+            "enabled": True, "initial_price_cent": price, "hourly_bps": None,
+            "daily_bps": None, "fee_bps": None, "revision": 1, "trade_count": 0}
 
 
 def ensure(data: dict[str, Any]) -> dict[str, Any]:
@@ -80,7 +89,7 @@ def ensure(data: dict[str, Any]) -> dict[str, Any]:
             raise EconomyError(f"积分玩法数据 {key} 格式不正确")
     for key, value in DEFAULT_SETTINGS.items():
         economy["settings"].setdefault(key, copy.deepcopy(value))
-    _validated_settings({key: economy["settings"][key] for key in DEFAULT_SETTINGS}, DEFAULT_SETTINGS)
+    _validated_settings({key: economy["settings"][key] for key in DEFAULT_SETTINGS if key != "auto_stock_code"}, DEFAULT_SETTINGS)
     for key in ("savings", "positions", "predictions", "daily_usage", "cards", "operations"):
         if any(not isinstance(record, dict) for record in economy[key].values()):
             raise EconomyError(f"积分玩法数据 {key} 的记录必须是对象")
@@ -93,12 +102,6 @@ def ensure(data: dict[str, Any]) -> dict[str, Any]:
             raise EconomyError("存款缺少计息游标，禁止重建以免重复发息")
         if account.get("interest_remainder", 0) >= INTEREST_DENOMINATOR:
             raise EconomyError("存款计息余数格式异常")
-    for holdings in economy["positions"].values():
-        for code, holding in holdings.items():
-            if code not in STOCKS or not isinstance(holding, dict):
-                raise EconomyError("持仓股票或记录格式异常")
-            _integer(holding.get("quantity"), "持仓股数")
-            _integer(holding.get("cost_total"), "持仓成本")
     if "market" not in economy:
         economy["market"] = default_economy()["market"]
     market = economy["market"]
@@ -107,16 +110,41 @@ def ensure(data: dict[str, Any]) -> dict[str, Any]:
     if "seed" not in market:
         market["seed"] = secrets.token_hex(32)
     market.setdefault("last_hour", None)
+    removed = market.setdefault("removed_stocks", [])
+    if not isinstance(removed, list) or any(not isinstance(code, str) for code in removed):
+        raise EconomyError("已删除股票记录格式异常")
     for code, name in STOCKS.items():
-        market["stocks"].setdefault(code, {
-            "code": code, "name": name, "price": 10000, "open_price": 10000,
-            "date": "", "last_updated": 0, "history": [],
-        })
-        stock = market["stocks"][code]
+        if code not in removed:
+            market["stocks"].setdefault(code, _default_stock(code, name, 10000))
+    for code, stock in market["stocks"].items():
         if not isinstance(stock, dict):
             raise EconomyError("股票行情记录必须是对象")
+        if not _STOCK_CODE_RE.fullmatch(str(code)) or stock.get("code") != code:
+            raise EconomyError("股票代码或行情记录格式异常")
+        if not isinstance(stock.get("name"), str) or not 1 <= len(stock["name"].strip()) <= 30:
+            raise EconomyError("股票名称格式异常")
+        defaults = {"buy_enabled": True, "enabled": True, "initial_price_cent": stock.get("price", 10000),
+                    "hourly_bps": None, "daily_bps": None, "fee_bps": None, "revision": 1, "trade_count": 0}
+        for key, value in defaults.items():
+            stock.setdefault(key, value)
+        if type(stock["buy_enabled"]) is not bool or type(stock["enabled"]) is not bool:
+            raise EconomyError("股票买入开关格式异常")
+        for key in ("hourly_bps", "daily_bps", "fee_bps"):
+            if stock[key] is not None:
+                _integer(stock[key], f"股票 {code} {key}", 0, 10000)
+        _integer(stock["revision"], "股票版本", 1)
+        _integer(stock["trade_count"], "股票交易次数")
         _integer(stock.get("price"), "股票价格", 100)
         _integer(stock.get("open_price"), "股票开盘价", 100)
+    known = set(market["stocks"])
+    for holdings in economy["positions"].values():
+        for code, holding in holdings.items():
+            if code not in known or not isinstance(holding, dict):
+                raise EconomyError("持仓股票或记录格式异常")
+            _integer(holding.get("quantity"), "持仓股数")
+            _integer(holding.get("cost_total"), "持仓成本")
+    if economy["settings"].get("auto_stock_code") not in known:
+        economy["settings"]["auto_stock_code"] = next(iter(known), "ST01")
     return economy
 
 
@@ -206,7 +234,7 @@ def _wallet(data: dict[str, Any], user_key: str, delta: int, now: float, kind: s
     entry.update(source=source, fee=fee, profit=earned if profit is None else profit)
 
 
-def _validated_settings(payload: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+def _validated_settings(payload: dict[str, Any], current: dict[str, Any], allowed_stock_codes: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise EconomyError("玩法设置必须是对象")
     unknown = set(payload) - set(DEFAULT_SETTINGS)
@@ -218,8 +246,9 @@ def _validated_settings(payload: dict[str, Any], current: dict[str, Any]) -> dic
             if type(value) is not bool:
                 raise EconomyError(f"{key}必须是布尔值")
         elif key == "auto_stock_code":
-            if not isinstance(value, str) or value not in STOCKS:
-                raise EconomyError("自动竞猜股票代码必须为 ST01 至 ST04")
+            allowed = allowed_stock_codes or set(STOCKS)
+            if not isinstance(value, str) or value not in allowed:
+                raise EconomyError("自动竞猜股票代码必须选择已存在的股票")
         elif key == "lottery_prizes":
             if not isinstance(value, list) or not 1 <= len(value) <= 30:
                 raise EconomyError("彩票奖项需要 1 至 30 项")
@@ -244,7 +273,7 @@ def _validated_settings(payload: dict[str, Any], current: dict[str, Any]) -> dic
 
 def update_settings(data: dict[str, Any], payload: dict[str, Any], now: float) -> dict[str, Any]:
     economy = ensure(data)
-    settings = _validated_settings(payload, economy["settings"])
+    settings = _validated_settings(payload, economy["settings"], set(economy["market"]["stocks"]))
     settle_due(data, now)  # 已流逝的时间、到期旧局先使用原规则。
     economy["settings"] = settings
     settle_due(data, now)  # 中途启用时，可创建当前尚未封盘的自动局。
@@ -310,9 +339,15 @@ def _advance_market(data: dict[str, Any], economy: dict[str, Any], now: float) -
             if stock["date"] != day:
                 stock["date"] = day
                 stock["open_price"] = stock["price"]
-            delta = _stock_delta(market["seed"], code, slot, economy["settings"]["stock_hourly_bps"])
+            hourly_bps = stock.get("hourly_bps")
+            if hourly_bps is None:
+                hourly_bps = economy["settings"]["stock_hourly_bps"]
+            daily_bps = stock.get("daily_bps")
+            if daily_bps is None:
+                daily_bps = economy["settings"]["stock_daily_bps"]
+            delta = _stock_delta(market["seed"], code, slot, hourly_bps)
             candidate = (stock["price"] * (10000 + delta) + 5000) // 10000
-            cap = economy["settings"]["stock_daily_bps"]
+            cap = daily_bps
             floor = max(100, _ceil(stock["open_price"] * (10000 - cap), 10000))
             ceiling = min(MAX_INTEGER, max(100, stock["open_price"] * (10000 + cap) // 10000))
             stock["price"] = max(floor, min(ceiling, candidate))
@@ -430,8 +465,97 @@ def _public_stocks(economy: dict[str, Any]) -> list[dict[str, Any]]:
              "price_cent": stock["price"], "price_text": _money(stock["price"]),
              "open_price": stock["open_price"], "open_price_cent": stock["open_price"],
              "change_bps": (stock["price"] - stock["open_price"]) * 10000 // stock["open_price"],
-             "last_updated": stock["last_updated"]}
+             "last_updated": stock["last_updated"], "buy_enabled": stock.get("buy_enabled", True),
+             "enabled": stock.get("enabled", True), "initial_price_cent": stock.get("initial_price_cent", stock["price"]),
+             "hourly_bps": stock.get("hourly_bps"), "daily_bps": stock.get("daily_bps"),
+             "fee_bps": stock.get("fee_bps"), "revision": stock.get("revision", 1),
+             "trade_count": stock.get("trade_count", 0),
+             # 只公开最近行情快照，供聊天/后台画趋势图；不包含随机种子或交易明细。
+             "history": [{"hour": row["hour"], "price": row["price"], "price_cent": row["price"]}
+                         for row in stock.get("history", [])[-169:]
+                         if isinstance(row, dict) and isinstance(row.get("hour"), int)
+                         and isinstance(row.get("price"), int)]}
             for stock in economy["market"]["stocks"].values()]
+
+
+def _stock_definition(data: dict[str, Any], payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise EconomyError("股票参数必须是对象")
+    code = str(payload.get("code") or (existing or {}).get("code") or "").strip().upper()
+    if not _STOCK_CODE_RE.fullmatch(code):
+        raise EconomyError("股票代码须为 2～12 位大写字母、数字或下划线，且以字母开头")
+    name = str(payload.get("name") if "name" in payload else (existing or {}).get("name") or "").strip()
+    if not 1 <= len(name) <= 30:
+        raise EconomyError("股票名称须为 1～30 个字符")
+    def optional_bps(key: str) -> int | None:
+        value = payload.get(key, (existing or {}).get(key))
+        if value in (None, ""):
+            return None
+        return _integer(value, key, 0, 10000)
+    buy_enabled = payload.get("buy_enabled", (existing or {}).get("buy_enabled", True))
+    if type(buy_enabled) is not bool:
+        raise EconomyError("buy_enabled 必须是布尔值")
+    initial = payload.get("initial_price_cent")
+    if existing is not None:
+        if initial not in (None, ""):
+            raise EconomyError("已有股票不能修改初始价格；请停牌后删除并新建代码")
+        initial_cent = int(existing.get("initial_price_cent", existing["price"]))
+    else:
+        if initial in (None, ""):
+            initial = payload.get("initial_price", 100)
+            initial_cent = _integer(initial, "初始价格", 1, MAX_INTEGER // 100) * 100
+        else:
+            initial_cent = _integer(initial, "初始价格（百分之一积分）", 100, MAX_INTEGER)
+    return {"code": code, "name": name, "buy_enabled": buy_enabled,
+            "hourly_bps": optional_bps("hourly_bps"), "daily_bps": optional_bps("daily_bps"),
+            "fee_bps": optional_bps("fee_bps"), "initial_price_cent": initial_cent}
+
+
+def upsert_stock(data: dict[str, Any], payload: dict[str, Any], now: float) -> dict[str, Any]:
+    economy = ensure(data)
+    stocks = economy["market"]["stocks"]
+    code = str(payload.get("code") or "").strip().upper() if isinstance(payload, dict) else ""
+    existing = stocks.get(code)
+    if existing is None and len(stocks) >= 30:
+        raise EconomyError("最多只能配置 30 只股票")
+    definition = _stock_definition(data, payload, existing)
+    if existing is None:
+        removed = economy["market"].setdefault("removed_stocks", [])
+        if code in removed:
+            removed.remove(code)
+        stock = _default_stock(definition["code"], definition["name"], definition["initial_price_cent"])
+        stock.update({key: definition[key] for key in ("buy_enabled", "hourly_bps", "daily_bps", "fee_bps")})
+        stock["revision"] = 1
+        stocks[definition["code"]] = stock
+    else:
+        changed = any(existing.get(key) != definition[key] for key in ("name", "buy_enabled", "hourly_bps", "daily_bps", "fee_bps"))
+        for key in ("name", "buy_enabled", "hourly_bps", "daily_bps", "fee_bps"):
+            existing[key] = definition[key]
+        if changed:
+            existing["revision"] = int(existing.get("revision", 1)) + 1
+        stock = existing
+    return copy.deepcopy(_public_stocks(economy)[list(stocks).index(stock["code"])])
+
+
+def delete_stock(data: dict[str, Any], payload: dict[str, Any], now: float) -> str:
+    economy = ensure(data)
+    code = str(payload.get("code") or "").strip().upper() if isinstance(payload, dict) else ""
+    stock = economy["market"]["stocks"].get(code)
+    if stock is None:
+        raise EconomyError("股票不存在")
+    if len(economy["market"]["stocks"]) <= 1:
+        raise EconomyError("至少保留一只股票，不能删除最后一只")
+    if any(int(rows.get(code, {}).get("quantity", 0)) > 0 for rows in economy["positions"].values()):
+        raise EconomyError("该股票仍有持仓，不能删除；请先卖出或停牌")
+    if stock.get("trade_count", 0):
+        raise EconomyError("该股票已有成交记录，不能删除；请改为停牌")
+    if any(item.get("stock_code") == code and item.get("status") not in TERMINAL for item in economy["predictions"].values()):
+        raise EconomyError("该股票仍被竞猜使用，不能删除；请先处理竞猜")
+    economy["market"]["stocks"].pop(code)
+    economy["market"].setdefault("removed_stocks", []).append(code)
+    if economy["settings"].get("auto_stock_code") == code:
+        economy["settings"]["auto_stock_code"] = next(iter(economy["market"]["stocks"]), "ST01")
+    return f"已删除股票 {code}"
 
 
 def overview(data: dict[str, Any], now: float) -> dict[str, Any]:
@@ -444,6 +568,7 @@ def overview(data: dict[str, Any], now: float) -> dict[str, Any]:
                 "savings_principal": sum(item.get("principal", 0) for item in economy["savings"].values()),
                 "stock_holders": sum(any(item.get("quantity", 0) > 0 for item in positions.values()) for positions in economy["positions"].values()),
                 "open_predictions": sum(item["status"] == "open" for item in predictions),
+                "unsettled_predictions": sum(item["status"] not in TERMINAL for item in predictions),
                 "locked_prediction": sum(item["total_stake"] for item in predictions if item["status"] not in TERMINAL),
                 "lottery_tickets": sum(item.get("action") == "lottery_buy" for item in economy["operations"].values()),
             }}
@@ -531,15 +656,16 @@ def resolve_prediction(data: dict[str, Any], payload: dict[str, Any], now: float
     return _public_prediction(item)
 
 
-def _params(action: str, params: dict[str, Any]) -> dict[str, Any]:
+def _params(action: str, params: dict[str, Any], allowed_stock_codes: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(params, dict):
         raise EconomyError("操作参数必须是对象")
     if action in {"stock_buy", "stock_sell"}:
         if set(params) != {"code", "quantity"}:
             raise EconomyError("股票操作仅接受 code 和 quantity")
         code = params.get("code")
-        if not isinstance(code, str) or code not in STOCKS:
-            raise EconomyError("股票代码必须为 ST01 至 ST04")
+        allowed = allowed_stock_codes or set(STOCKS)
+        if not isinstance(code, str) or code not in allowed:
+            raise EconomyError("股票代码不存在")
         return {"code": code, "quantity": _integer(params.get("quantity"), "股数", 1)}
     if action in {"savings_deposit", "savings_withdraw"}:
         if set(params) != {"amount"}:
@@ -563,7 +689,7 @@ def prepare_action(data: dict[str, Any], user_key: str, action: str,
                    params: dict[str, Any], now: float) -> dict[str, Any]:
     economy = ensure(data)
     settings = economy["settings"]
-    normalized = _params(action, params)
+    normalized = _params(action, params, set(economy["market"]["stocks"]))
     user = _user(data, user_key)
     usage = daily(data, user_key, now)
     details: dict[str, Any] = {"date": usage["date"]}
@@ -573,9 +699,12 @@ def prepare_action(data: dict[str, Any], user_key: str, action: str,
         if usage["stock_trades"] >= settings["stock_daily_trades"]:
             raise EconomyError("今日股票交易次数已达上限")
         stock = economy["market"]["stocks"][normalized["code"]]
+        if action == "stock_buy" and stock.get("buy_enabled", True) is not True:
+            raise EconomyError("该股票已暂停买入，但仍可卖出已有持仓")
         quantity = normalized["quantity"]
         gross = _ceil(stock["price"] * quantity, 100) if action == "stock_buy" else stock["price"] * quantity // 100
-        fee = max(1, _ceil(gross * settings["stock_fee_bps"], 10000))
+        fee_bps = stock.get("fee_bps") if stock.get("fee_bps") is not None else settings["stock_fee_bps"]
+        fee = max(1, _ceil(gross * fee_bps, 10000))
         if action == "stock_buy":
             if gross + fee > user["points"]:
                 raise EconomyError("积分不足，买入金额需包含手续费")
@@ -591,7 +720,7 @@ def prepare_action(data: dict[str, Any], user_key: str, action: str,
             if gross < 1 or gross - fee < 0:
                 raise EconomyError("卖出所得不足以支付手续费")
         details.update(price_cent=stock["price"], market_hour=economy["market"]["last_hour"],
-                       gross=gross, fee=fee, fee_bps=settings["stock_fee_bps"],
+                       gross=gross, fee=fee, fee_bps=fee_bps, stock_revision=stock.get("revision", 1),
                        daily_trades=settings["stock_daily_trades"], daily_buy_limit=settings["stock_daily_buy_limit"])
         text = (f"{'买入' if action == 'stock_buy' else '卖出'} {stock['name']}（{stock['code']}）{quantity} 股，"
                 f"每股 {_money(stock['price'])} 积分，本金 {gross}，手续费 {fee}，"
@@ -661,7 +790,7 @@ def execute_action(data: dict[str, Any], user_key: str, action: str, params: dic
                    quote: dict[str, Any], operation_id: str, now: float) -> dict[str, Any]:
     """先读持久回执，再核对报价；异常由外层原子事务完整回滚。"""
     economy = ensure(data)
-    normalized = _params(action, params)
+    normalized = _params(action, params, set(economy["market"]["stocks"]))
     if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 200:
         raise EconomyError("操作编号不能为空且不能超过 200 字符")
     digest = _digest(normalized)
@@ -699,6 +828,7 @@ def execute_action(data: dict[str, Any], user_key: str, action: str, params: dic
             _wallet(data, user_key, gross - fee, now, "股票卖出", operation_id, fresh["text"], spent=fee, fee=fee, profit=realized - fee)
             result["realized_profit"] = realized
         usage["stock_trades"] += 1
+        economy["market"]["stocks"][code]["trade_count"] = int(economy["market"]["stocks"][code].get("trade_count", 0)) + 1
         result.update(gross=gross, fee=fee, quantity=quantity, code=code)
         message = fresh["text"]
     elif action in {"savings_deposit", "savings_withdraw"}:
@@ -738,4 +868,5 @@ def execute_action(data: dict[str, Any], user_key: str, action: str, params: dic
 
 
 __all__ = ["EconomyError", "default_economy", "ensure", "daily", "settle_due", "update_settings",
-           "overview", "user_assets", "prepare_action", "execute_action", "create_prediction", "resolve_prediction"]
+           "overview", "user_assets", "prepare_action", "execute_action", "create_prediction", "resolve_prediction",
+           "upsert_stock", "delete_stock"]

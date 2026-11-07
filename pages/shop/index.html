@@ -34,9 +34,9 @@
       <button class="tab active" data-tab="products" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h16l-1 11H5L4 9ZM8 9V7a4 4 0 0 1 8 0v2M3 9h18" /></svg><span>商品管理</span></button>
       <button class="tab" data-tab="rewards" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v16H5zM8 3v4M16 3v4M5 10h14M8 15l3 3 5-5" /></svg><span>打卡规则</span></button>
       <button class="tab" data-tab="users" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="4" /><path d="M3 21v-2a7 7 0 0 1 14 0v2M17 4a4 4 0 0 1 0 8M21 21v-2a7 7 0 0 0-3-6" /></svg><span>用户积分</span></button>
-      <button class="tab" data-tab="redemptions" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v14H4zM2 7h20v4H2zM12 7v14M12 7H8a3 3 0 1 1 3-3l1 3ZM12 7h4a3 3 0 1 0-3-3l-1 3Z" /></svg><span>兑换记录</span></button>
+      <button class="tab" data-tab="redemptions" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v14H4zM2 7h20v4H2zM12 7v14M12 7H8a3 3 0 1 1 3-3l1 3ZM12 7h4a3 3 0 1 0-3-3l-1 3Z" /></svg><span>兑换记录</span><span class="tab-badge" id="tab-badge-redemptions" hidden aria-label="待发放兑换">0</span></button>
       <button class="tab" data-tab="ledger" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v18l-3-2-4 2-4-2-3 2V3ZM9 8h6M9 12h6M9 16h3" /></svg><span>账单流水</span></button>
-      <button class="tab" data-tab="economy" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l5-5 4 3 7-9M15 6h5v5M4 4v16h16" /></svg><span>玩法管理</span></button>
+      <button class="tab" data-tab="economy" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l5-5 4 3 7-9M15 6h5v5M4 4v16h16" /></svg><span>玩法管理</span><span class="tab-badge" id="tab-badge-economy" hidden aria-label="待处理竞猜">0</span></button>
       <button class="tab" data-tab="settings" role="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="9" cy="6" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="8" cy="18" r="2" /></svg><span>展示设置</span></button>
     </nav>
 
@@ -433,6 +433,26 @@
                 <div class="form-grid" id="economy-stock-fields"></div>
                 <div class="table-wrap compact-table-wrap"><table class="table" id="economy-stock-table"><thead><tr><th>代码 / 名称</th><th class="num">现价</th><th class="num">本日涨跌</th><th>更新时间（北京时间）</th></tr></thead><tbody></tbody></table></div>
                 <p id="economy-stocks-empty" class="empty" hidden>暂无股票行情。</p>
+                <section class="stock-trend" aria-labelledby="stock-trend-title">
+                  <div class="section-heading"><div><h3 id="stock-trend-title">行情趋势</h3><span class="section-note">按小时行情快照绘制，北京时间</span></div><label class="trend-select-label"><span class="field-label">查看股票</span><select id="economy-stock-trend-select" aria-label="选择趋势图股票"></select></label></div>
+                  <div class="stock-trend-chart"><canvas id="economy-stock-trend-canvas" width="720" height="260" role="img" aria-label="股票行情趋势图"></canvas><p id="economy-stock-trend-empty" class="empty" hidden>该股票暂无足够的历史行情，生成下一次整点行情后会显示趋势。</p></div>
+                </section>
+                <div class="section-heading"><h3>股票自定义</h3><button id="stock-new" class="btn btn-secondary" type="button">新增股票</button></div>
+                <p class="muted">可编辑名称和独立波动规则；现价只能由行情自动变化，不能后台直接改价。停牌会禁止新买入，但保留卖出和持仓。</p>
+                <div id="stock-editor" class="stock-editor" hidden>
+                  <div class="form-grid">
+                    <label><span class="field-label">股票代码</span><input id="stock-code" maxlength="12" placeholder="例如 CAT01" /><span id="stock-code-error" class="field-error"></span></label>
+                    <label><span class="field-label">名称</span><input id="stock-name" maxlength="30" placeholder="例如 喵喵科技" /><span id="stock-name-error" class="field-error"></span></label>
+                    <label><span class="field-label">初始价（分/股，仅新增）</span><input id="stock-initial-price" type="number" min="1" step="1" /><span id="stock-initial-price-error" class="field-error"></span></label>
+                    <label><span class="field-label">每小时最大波动（%）</span><input id="stock-hourly-percent" type="number" min="0" max="100" step="0.01" /><span id="stock-hourly-percent-error" class="field-error"></span></label>
+                    <label><span class="field-label">每日最大波动（%）</span><input id="stock-daily-percent" type="number" min="0" max="100" step="0.01" /><span id="stock-daily-percent-error" class="field-error"></span></label>
+                    <label><span class="field-label">独立手续费（%）</span><input id="stock-fee-percent" type="number" min="0" max="100" step="0.01" placeholder="跟随全局" /><span id="stock-fee-percent-error" class="field-error"></span></label>
+                    <label class="switch-field"><input id="stock-buy-enabled" type="checkbox" checked /><span>允许买入</span></label>
+                  </div>
+                  <div class="row-end"><button id="stock-cancel" class="btn btn-secondary" type="button">取消</button><button id="stock-save" class="btn btn-primary" type="button">保存股票</button></div>
+                </div>
+                <div class="table-wrap compact-table-wrap"><table class="table" id="stock-admin-table"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>规则</th><th>状态</th><th class="actions">操作</th></tr></thead><tbody></tbody></table></div>
+                <p id="stock-admin-empty" class="empty" hidden>还没有自定义股票。</p>
               </div>
             </details>
             <details class="economy-section" open>

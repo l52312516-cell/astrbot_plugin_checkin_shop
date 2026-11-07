@@ -2,13 +2,33 @@
 from __future__ import annotations
 
 from datetime import date
+import re
 
 from .items import integer
 from .timeutil import format_moment
 
 
+def _parts(section: str, text: str) -> list[str]:
+    """读取命令参数，兼容不同 AstrBot 版本传入的完整命令文本。
+
+    正常情况下 CommandFilter 会把 ``积分通`` 从参数中去掉；部分适配器/旧版
+    GreedyStr 会把完整的 ``+积分通 存入 200`` 或 ``积分通 存入 200`` 传进来，
+    之前这会把命令名当成第一个参数而返回用法错误。
+    """
+    parts = str(text or "").strip().split()
+    if not parts:
+        return []
+    first = parts[0]
+    # 去掉唤醒前缀（+、/、@ 等非字母/数字/CJK字符）后，若正好是当前分区名，
+    # 只消费这一段；其余参数保持原样，避免改动竞猜选项文本。
+    bare = re.sub(r"^[^\w\u4e00-\u9fff]*", "", first)
+    if bare == section:
+        return parts[1:]
+    return parts
+
+
 def parse(section: str, text: str) -> tuple[str, dict] | None:
-    parts = text.strip().split()
+    parts = _parts(section, text)
     if section == "股市" and parts and parts[0] in ("买入", "卖出"):
         if len(parts) != 3:
             raise ValueError("用法：股市 买入/卖出 ST01 股数")
@@ -34,6 +54,7 @@ def parse(section: str, text: str) -> tuple[str, dict] | None:
 
 def display(section: str, text: str, overview: dict, assets: dict, prefix: str) -> str:
     settings = overview["settings"]
+    text = " ".join(_parts(section, text))
     if section == "股市":
         if text.strip() == "持仓":
             lines = ["我的股票持仓"]
@@ -45,10 +66,14 @@ def display(section: str, text: str, overview: dict, assets: dict, prefix: str) 
         else:
             lines = ["虚构股市" + ("（买入未开启）" if not settings["stocks_enabled"] else "")]
             for s in overview["stocks"]:
-                lines.append(f"{s['code']} {s['name']} · {s['price_text']} 分/股 · 日涨跌 {s['change_bps']/100:+.2f}%")
+                extra = f" · 手续费 {s['fee_bps']/100:g}%" if s.get('fee_bps') is not None else ""
+                if s.get('buy_enabled') is False:
+                    extra += " · 暂停买入，可卖出"
+                lines.append(f"{s['code']} {s['name']} · {s['price_text']} 分/股 · 日涨跌 {s['change_bps']/100:+.2f}%{extra}")
             if overview["stocks"]:
                 lines.append("报价时间：" + (format_moment(overview['stocks'][0]['last_updated']) or "尚未开市"))
-        lines += [f"买卖手续费 {settings['stock_fee_bps']/100:g}%（至少1分）", f"每日最多 {settings['stock_daily_trades']} 笔，买入含费最多 {settings['stock_daily_buy_limit']} 分", f"{prefix}股市 买入 ST01 1", f"{prefix}股市 卖出 ST01 1 / {prefix}股市 持仓"]
+        example_code = overview["stocks"][0]["code"] if overview.get("stocks") else "股票代码"
+        lines += [f"全局默认手续费 {settings['stock_fee_bps']/100:g}%（至少1分）；单股独立费率以行情标注和确认报价为准", f"每日最多 {settings['stock_daily_trades']} 笔，买入含费最多 {settings['stock_daily_buy_limit']} 分", f"{prefix}股市 买入 {example_code} 1", f"{prefix}股市 卖出 {example_code} 1 / {prefix}股市 持仓"]
         return "\n".join(lines)
     if section == "积分通":
         account = assets["savings"]

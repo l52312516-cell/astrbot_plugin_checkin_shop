@@ -29,8 +29,11 @@ const state = {
   rewardsLoaded: false,
   economy: null,
   economyLoaded: false,
+  economyLoading: null,
   assetUserKey: '',
   assetRequest: 0,
+  editingStockCode: '',
+  trendStockCode: '',
 };
 
 const PAGE_SIZE = 20;
@@ -324,6 +327,33 @@ function renderStats() {
         `<div class="stat ${className}"><b>${value}</b><span>${label}</span><small>${hint}</small></div>`,
     )
     .join('');
+  updateTabBadges();
+}
+
+function setTabBadge(id, count, label) {
+  const badge = $(id);
+  if (!badge) return;
+  const value = Number.isFinite(Number(count)) ? Math.max(0, Number(count)) : 0;
+  badge.hidden = value <= 0;
+  badge.textContent = value > 99 ? '99+' : String(value);
+  badge.setAttribute('aria-label', value > 0 ? `${label} ${value} 项` : `${label} 0 项`);
+}
+
+function updateTabBadges() {
+  const stats = state.summary?.statistics || {};
+  setTabBadge('tab-badge-redemptions', stats.pending_redemption_count || 0, '待发放兑换');
+  const predictions = Array.isArray(state.economy?.predictions) ? state.economy.predictions : [];
+  const pendingPredictions = predictions.filter(predictionNeedsAdminAction).length;
+  setTabBadge('tab-badge-economy', pendingPredictions, '待处理竞猜');
+}
+
+function predictionNeedsAdminAction(prediction) {
+  if (!prediction || prediction.source === 'auto') return false;
+  const status = String(prediction.status || 'open');
+  if (['resolved', 'settled', 'cancelled', 'canceled', 'void', '已结算', '已作废'].includes(status)) return false;
+  if (status === 'closed') return true;
+  const closeAt = Number(prediction.close_at ?? prediction.closes_at);
+  return status === 'open' && Number.isFinite(closeAt) && closeAt <= Date.now() / 1000;
 }
 
 async function loadSummary() {
@@ -380,6 +410,7 @@ function fillRewardForm(rewards) {
   $('bonus-enabled').checked = data.streak_bonus_enabled !== false;
   $('bonus-every').value = data.streak_bonus_every ?? 7;
   $('bonus-points').value = data.streak_bonus_points ?? 50;
+  syncSwitchState();
   syncRewardMode();
 }
 
@@ -439,6 +470,7 @@ function fillSettingsForm(settings) {
   $('set-timeout').value = settings.confirm_timeout_seconds ?? 60;
   $('set-reset-hour').value = settings.reset_hour ?? 0;
   $('set-scope').value = settings.points_scope || 'platform_user';
+  syncSwitchState();
   updatePrefixHint();
 }
 
@@ -800,6 +832,7 @@ function openProduct(product) {
   // 编辑时保留原有 sort_order，否则"保存一下就跳到列表最后"（序号会跟着变）
   state.editingSortOrder = editing ? Number(product.sort_order) || 0 : null;
   state.pendingImage = null;
+  syncSwitchState();
   syncProductType();
   renderProductPreview();
   showModal('product-modal', $('p-name'));
@@ -830,7 +863,7 @@ function syncProductType(applyDefaults = false) {
 
 function updateProductEffectSummary() {
   if ($('p-type').value === 'checkin_boost') {
-    $('p-effect-summary').textContent = `兑换后次日生效，持续 ${$('p-boost-days').value || '—'} 个签到日；基础签到积分按 ${$('p-boost-multiplier').value || '—'}% 计算，额外积分每日最多 ${$('p-boost-cap').value || '0'} 分，不含连签奖励。已有待生效或生效中的卡时不能重复购买。`;
+    $('p-effect-summary').textContent = `即日起生效，持续 ${$('p-boost-days').value || '—'} 个业务日；基础签到积分按 ${$('p-boost-multiplier').value || '—'}% 计算，额外积分每日最多 ${$('p-boost-cap').value || '0'} 分，不含连签奖励。已有生效中的卡时不能重复购买。`;
   } else {
     $('p-effect-summary').textContent = `兑换时按扣购卡价前的可用钱包余额返还 ${$('p-rebate-rate').value || '0'}%，最高 ${$('p-rebate-cap').value || '0'} 积分；存款、持仓与竞猜资金不计入。返还少于卡价时不可兑换，同类卡冷却 ${$('p-rebate-cooldown').value || '0'} 小时。`;
   }
@@ -1390,6 +1423,13 @@ function textNode(tag, value, className) {
   return node;
 }
 
+function syncSwitchState(root = document) {
+  if (!root || typeof root.querySelectorAll !== 'function') root = document;
+  root.querySelectorAll('input[type="checkbox"][role="switch"]').forEach((input) => {
+    input.setAttribute('aria-checked', String(input.checked));
+  });
+}
+
 function beijingTime(value) {
   if (value === null || value === undefined || value === '') return '—';
   const date = new Date(Number(value) * 1000);
@@ -1400,6 +1440,105 @@ function stockPrice(stock) {
   if (stock.price_text !== undefined) return String(stock.price_text);
   const cent = Number(stock.price_cent ?? stock.price);
   return Number.isFinite(cent) ? (cent / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+}
+
+function renderStockTrend(stocks = []) {
+  const select = $('economy-stock-trend-select');
+  const canvas = $('economy-stock-trend-canvas');
+  const empty = $('economy-stock-trend-empty');
+  const rows = Array.isArray(stocks) ? stocks.filter((item) => item && typeof item.code === 'string') : [];
+  const previous = state.trendStockCode || select.value;
+  select.replaceChildren();
+  rows.forEach((stock) => {
+    const option = textNode('option', `${stock.code} · ${stock.name || stock.code}`);
+    option.value = stock.code;
+    select.appendChild(option);
+  });
+  const chosen = rows.find((stock) => stock.code === previous) || rows[0];
+  state.trendStockCode = chosen?.code || '';
+  select.value = state.trendStockCode;
+  if (!chosen) {
+    canvas.hidden = true;
+    canvas.style.display = 'none';
+    empty.hidden = false;
+    empty.textContent = '暂无股票，添加股票后可查看趋势。';
+    canvas.setAttribute('aria-label', '暂无股票行情趋势');
+    return;
+  }
+  const history = Array.isArray(chosen.history) ? chosen.history.filter((point) =>
+    point && Number.isFinite(Number(point.hour)) && Number.isSafeInteger(Number(point.price)) && Number(point.price) >= 0,
+  ).sort((first, second) => Number(first.hour) - Number(second.hour)) : [];
+  if (history.length < 2) {
+    canvas.hidden = true;
+    canvas.style.display = 'none';
+    empty.hidden = false;
+    empty.textContent = `「${chosen.name || chosen.code}」暂无足够的历史行情，生成下一次整点行情后会显示趋势。`;
+    canvas.setAttribute('aria-label', `${chosen.code} ${chosen.name || ''} 暂无足够历史行情`);
+    return;
+  }
+  canvas.hidden = false;
+  canvas.style.display = 'block';
+  empty.hidden = true;
+  const width = Math.max(320, Math.floor(canvas.clientWidth || 720));
+  const height = 260;
+  const ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  canvas.style.height = `${height}px`;
+  const context = canvas.getContext('2d');
+  if (!context) return;
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const theme = getComputedStyle(document.documentElement);
+  const textColor = theme.getPropertyValue('--muted').trim() || '#667085';
+  const lineColor = theme.getPropertyValue('--accent').trim() || '#2e6ba5';
+  const gridColor = theme.getPropertyValue('--border').trim() || '#e5e7eb';
+  context.clearRect(0, 0, width, height);
+  const values = history.map((point) => Number(point.price));
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const range = Math.max(1, high - low);
+  const pad = { left: 62, right: 18, top: 22, bottom: 38 };
+  const chartWidth = width - pad.left - pad.right;
+  const chartHeight = height - pad.top - pad.bottom;
+  context.font = '12px system-ui, sans-serif';
+  context.lineWidth = 1;
+  context.strokeStyle = gridColor;
+  context.fillStyle = textColor;
+  context.textAlign = 'right';
+  context.textBaseline = 'middle';
+  for (let tick = 0; tick <= 3; tick += 1) {
+    const y = pad.top + chartHeight * tick / 3;
+    const value = high - range * tick / 3;
+    context.beginPath(); context.moveTo(pad.left, y); context.lineTo(width - pad.right, y); context.stroke();
+    context.fillText((value / 100).toFixed(2), pad.left - 9, y);
+  }
+  const firstHour = Number(history[0].hour);
+  const hourRange = Math.max(1, Number(history[history.length - 1].hour) - firstHour);
+  const points = history.map((point) => ({
+    x: pad.left + chartWidth * (Number(point.hour) - firstHour) / hourRange,
+    y: pad.top + chartHeight * (high - Number(point.price)) / range,
+  }));
+  context.strokeStyle = lineColor;
+  context.lineWidth = 2.5;
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.beginPath();
+  points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+  context.stroke();
+  context.fillStyle = lineColor;
+  points.forEach((point) => { context.beginPath(); context.arc(point.x, point.y, 2.5, 0, Math.PI * 2); context.fill(); });
+  const labels = width < 480
+    ? [history[0], history[history.length - 1]]
+    : [history[0], history[Math.floor((history.length - 1) / 2)], history[history.length - 1]];
+  const timeFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  context.fillStyle = textColor;
+  context.textBaseline = 'top';
+  labels.forEach((point, index) => {
+    context.textAlign = index === 0 ? 'left' : index === labels.length - 1 ? 'right' : 'center';
+    const x = pad.left + chartWidth * (Number(point.hour) - firstHour) / hourRange;
+    context.fillText(timeFormat.format(new Date(Number(point.hour) * 3600 * 1000)), x, height - pad.bottom + 12);
+  });
+  canvas.setAttribute('aria-label', `${chosen.code} ${chosen.name || ''} 行情趋势，最高 ${(high / 100).toFixed(2)} 积分，最低 ${(low / 100).toFixed(2)} 积分，当前 ${(values.at(-1) / 100).toFixed(2)} 积分`);
 }
 
 function setupEconomyFields() {
@@ -1484,16 +1623,18 @@ function fillEconomySettings(settings) {
   $('lottery-prizes').replaceChildren();
   (Array.isArray(settings.lottery_prizes) ? settings.lottery_prizes : DEFAULT_LOTTERY_PRIZES).forEach(addLotteryPrize);
   $('lottery-prizes-error').textContent = '';
+  syncSwitchState();
 }
 
 function renderEconomyOverview() {
   const data = state.economy || {};
   const statistics = data.statistics || {};
   const metrics = $('economy-statistics'); metrics.replaceChildren();
-  [['积分通本金', statistics.savings_principal], ['股票持有人数', statistics.stock_holders], ['未结算竞猜', statistics.open_predictions], ['竞猜锁定积分', statistics.locked_prediction]].forEach(([title, value]) => {
+  [['积分通本金', statistics.savings_principal], ['股票持有人数', statistics.stock_holders], ['未结算竞猜', statistics.unsettled_predictions ?? statistics.open_predictions], ['竞猜锁定积分', statistics.locked_prediction]].forEach(([title, value]) => {
     const card = document.createElement('div'); card.append(textNode('span', title), textNode('b', formatStat(value))); metrics.appendChild(card);
   });
   const stocks = Array.isArray(data.stocks) ? data.stocks : [];
+  renderStockTrend(stocks);
   const body = $('economy-stock-table').querySelector('tbody'); body.replaceChildren();
   stocks.forEach((stock) => {
     const row = document.createElement('tr');
@@ -1502,23 +1643,122 @@ function renderEconomyOverview() {
   });
   $('economy-stock-table').closest('.table-wrap').hidden = !stocks.length;
   $('economy-stocks-empty').hidden = Boolean(stocks.length);
+  renderStockAdmin(stocks);
+  updateTabBadges();
   renderPredictions(Array.isArray(data.predictions) ? data.predictions : []);
 }
 
+function renderStockAdmin(stocks) {
+  const body = $('stock-admin-table')?.querySelector('tbody');
+  if (!body) return;
+  body.replaceChildren();
+  const rows = Array.isArray(stocks) ? stocks : [];
+  $('stock-admin-empty').hidden = Boolean(rows.length);
+  rows.forEach((stock) => {
+    const row = document.createElement('tr');
+    const code = String(stock.code || '');
+    const hourly = stock.hourly_bps === null || stock.hourly_bps === undefined ? '全局' : `${Number(stock.hourly_bps) / 100}%`;
+    const daily = stock.daily_bps === null || stock.daily_bps === undefined ? '全局' : `${Number(stock.daily_bps) / 100}%`;
+    const fee = stock.fee_bps === null || stock.fee_bps === undefined ? '全局' : `${Number(stock.fee_bps) / 100}%`;
+    const status = stock.buy_enabled === false ? '停牌（可卖出）' : '可买入';
+    row.append(textNode('td', code), textNode('td', stock.name || '—'), textNode('td', `${stockPrice(stock)} 积分`), textNode('td', `时 ${hourly} · 日 ${daily} · 手续费 ${fee}`), textNode('td', status));
+    const actions = document.createElement('td'); actions.className = 'actions stock-actions';
+    const edit = textNode('button', '编辑', 'btn-link'); edit.type = 'button'; edit.addEventListener('click', () => openStockEditor(stock));
+    const toggle = textNode('button', stock.buy_enabled === false ? '恢复买入' : '停牌买入', 'btn-link'); toggle.type = 'button'; toggle.addEventListener('click', () => run(toggle, () => toggleStockBuy(stock), '处理中'));
+    const remove = textNode('button', '删除', 'btn-link is-danger'); remove.type = 'button'; remove.addEventListener('click', () => run(remove, () => deleteStock(stock), '删除中'));
+    actions.append(edit, toggle, remove); row.appendChild(actions); body.appendChild(row);
+  });
+}
+
+function openStockEditor(stock = null) {
+  state.editingStockCode = stock ? String(stock.code || '') : '';
+  $('stock-editor').hidden = false;
+  $('stock-code').value = state.editingStockCode;
+  $('stock-code').disabled = Boolean(stock);
+  $('stock-name').value = stock?.name || '';
+  $('stock-initial-price').value = stock ? '' : '100';
+  $('stock-initial-price').disabled = Boolean(stock);
+  $('stock-hourly-percent').value = stock?.hourly_bps === null || stock?.hourly_bps === undefined ? '' : Number(stock.hourly_bps) / 100;
+  $('stock-daily-percent').value = stock?.daily_bps === null || stock?.daily_bps === undefined ? '' : Number(stock.daily_bps) / 100;
+  $('stock-fee-percent').value = stock?.fee_bps === null || stock?.fee_bps === undefined ? '' : Number(stock.fee_bps) / 100;
+  $('stock-buy-enabled').checked = stock?.buy_enabled !== false;
+  syncSwitchState();
+  ['stock-code','stock-name','stock-initial-price','stock-hourly-percent','stock-daily-percent','stock-fee-percent'].forEach((id) => setFieldError(id, ''));
+  $('stock-code').focus();
+}
+
+function closeStockEditor() { state.editingStockCode = ''; $('stock-editor').hidden = true; }
+
+function stockPercent(id, label, allowEmpty = true) {
+  const raw = $(id).value.trim();
+  if (allowEmpty && !raw) return null;
+  const value = Number(raw);
+  if (!raw || !Number.isFinite(value) || value < 0 || value > 100 || !/^\d+(\.\d{1,2})?$/.test(raw)) {
+    setFieldError(id, `${label}需为 0～100 的最多两位小数。`); return null;
+  }
+  return Math.round(value * 100);
+}
+
+async function saveStock() {
+  const ids = ['stock-code','stock-name','stock-initial-price','stock-hourly-percent','stock-daily-percent','stock-fee-percent'];
+  ids.forEach((id) => setFieldError(id, ''));
+  const code = $('stock-code').value.trim().toUpperCase();
+  const name = $('stock-name').value.trim();
+  let invalid = false;
+  if (!/^[A-Z][A-Z0-9_]{1,11}$/.test(code)) { setFieldError('stock-code', '代码需为 2～12 位大写字母、数字或下划线，且以字母开头。'); invalid = true; }
+  if (!name || name.length > 30) { setFieldError('stock-name', '名称需为 1～30 个字符。'); invalid = true; }
+  let initial = null;
+  if (!state.editingStockCode) {
+    const raw = $('stock-initial-price').value.trim();
+    initial = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(initial) || initial < 1) { setFieldError('stock-initial-price', '初始价需为正整数分。'); invalid = true; }
+  }
+  const hourly = stockPercent('stock-hourly-percent', '每小时波动');
+  const daily = stockPercent('stock-daily-percent', '每日波动');
+  const fee = stockPercent('stock-fee-percent', '手续费');
+  if (hourly === null && $('stock-hourly-percent').value.trim()) invalid = true;
+  if (daily === null && $('stock-daily-percent').value.trim()) invalid = true;
+  if (fee === null && $('stock-fee-percent').value.trim()) invalid = true;
+  if (invalid) { say('股票输入未保存，请修正标记字段。', 'error'); return; }
+  const payload = { code, name, initial_price_cent: initial === null ? undefined : initial * 100, hourly_bps: hourly, daily_bps: daily, fee_bps: fee, buy_enabled: $('stock-buy-enabled').checked };
+  const result = await post('shop/economy/stocks/upsert', payload);
+  say(result.message || '股票已保存', 'ok'); closeStockEditor(); await loadEconomy();
+}
+
+async function toggleStockBuy(stock) {
+  const result = await post('shop/economy/stocks/upsert', { code: stock.code, name: stock.name, hourly_bps: stock.hourly_bps ?? null, daily_bps: stock.daily_bps ?? null, fee_bps: stock.fee_bps ?? null, buy_enabled: stock.buy_enabled === false });
+  say(result.message || '股票状态已更新', 'ok'); await loadEconomy();
+}
+
+async function deleteStock(stock) {
+  const confirmed = await askConfirm({ title: '删除股票', message: `确认删除股票「${stock.code} ${stock.name}」？存在持仓、成交记录或未结算竞猜时无法删除，请先处理相关记录或停牌。`, confirmText: '删除', danger: true });
+  if (!confirmed) return;
+  const result = await post('shop/economy/stocks/delete', { code: stock.code });
+  say(result.message || '股票已删除', 'ok'); await loadEconomy();
+}
+
 async function loadEconomy() {
-  $('economy-load-status').textContent = '正在加载玩法配置…';
+  if (state.economyLoading) return state.economyLoading;
+  state.economyLoading = (async () => {
+    $('economy-load-status').textContent = '正在加载玩法配置…';
+    try {
+      const result = await bridge.apiGet('shop/economy/overview');
+      if (!result?.settings || typeof result.settings !== 'object' || Array.isArray(result.settings)) throw new Error('接口未返回有效玩法配置');
+      state.economy = result; state.economyLoaded = true;
+      fillEconomySettings(result.settings); renderEconomyOverview();
+      $('economy-config').hidden = false; $('save-economy').disabled = false;
+      $('economy-load-status').textContent = '配置已加载。保存设置后生效；行情与资产由机器人自动维护。';
+      return true;
+    } catch (error) {
+      $('economy-load-status').textContent = `玩法配置加载失败：${errorText(error)}。请点击「刷新玩法」重试。`;
+      $('save-economy').disabled = !state.economyLoaded;
+      return false;
+    }
+  })();
   try {
-    const result = await bridge.apiGet('shop/economy/overview');
-    if (!result?.settings || typeof result.settings !== 'object' || Array.isArray(result.settings)) throw new Error('接口未返回有效玩法配置');
-    state.economy = result; state.economyLoaded = true;
-    fillEconomySettings(result.settings); renderEconomyOverview();
-    $('economy-config').hidden = false; $('save-economy').disabled = false;
-    $('economy-load-status').textContent = '配置已加载。保存设置后生效；行情与资产由机器人自动维护。';
-    return true;
-  } catch (error) {
-    $('economy-load-status').textContent = `玩法配置加载失败：${errorText(error)}。请点击「刷新玩法」重试。`;
-    $('save-economy').disabled = !state.economyLoaded;
-    return false;
+    return await state.economyLoading;
+  } finally {
+    state.economyLoading = null;
   }
 }
 
@@ -1536,7 +1776,9 @@ async function saveEconomy() {
   });
   if (payload.prediction_min > payload.prediction_max) setFieldError(economyInputId('prediction_max'), '最高投入不能小于最低投入。');
   payload.auto_stock_code = $('e-auto-stock-code').value;
-  ids.push('e-auto-stock-code'); setFieldError('e-auto-stock-code', /^ST0[1-4]$/.test(payload.auto_stock_code) ? '' : '请选择 ST01 至 ST04 中的一只股票。');
+  ids.push('e-auto-stock-code');
+  const knownCodes = new Set((state.economy?.stocks || []).map((stock) => String(stock.code || '')));
+  setFieldError('e-auto-stock-code', knownCodes.has(payload.auto_stock_code) ? '' : '请选择当前存在的股票。');
   const prizes = []; let prizeError = '';
   Array.from($('lottery-prizes').children).forEach((row, index) => {
     const prize = {};
@@ -1755,6 +1997,13 @@ async function boot() {
   if (logo.complete && !logo.naturalWidth) logo.hidden = true;
   bindTabs();
   setupEconomyFields();
+  document.querySelectorAll('input[type="checkbox"]').forEach((input) => input.setAttribute('role', 'switch'));
+  document.querySelectorAll('input[type="checkbox"]').forEach((input) => input.addEventListener('change', () => syncSwitchState()));
+  syncSwitchState();
+  $('economy-stock-trend-select').addEventListener('change', () => {
+    state.trendStockCode = $('economy-stock-trend-select').value;
+    renderStockTrend(state.economy?.stocks || []);
+  });
   bindModalFocus();
   bindModalDismiss('product-modal', closeProduct);
   bindModalDismiss('adjust-modal', closeAdjust);
@@ -1781,6 +2030,9 @@ async function boot() {
   ['p-boost-multiplier', 'p-boost-days', 'p-boost-cap', 'p-rebate-rate', 'p-rebate-cap', 'p-rebate-cooldown'].forEach((id) => $(id).addEventListener('input', updateProductEffectSummary));
   $('economy-refresh').addEventListener('click', (event) => run(event.currentTarget, loadEconomy, '加载中'));
   $('save-economy').addEventListener('click', (event) => run(event.currentTarget, saveEconomy, '保存中'));
+  $('stock-new').addEventListener('click', () => openStockEditor());
+  $('stock-cancel').addEventListener('click', closeStockEditor);
+  $('stock-save').addEventListener('click', (event) => run(event.currentTarget, saveStock, '保存中'));
   $('lottery-prize-add').addEventListener('click', () => addLotteryPrize());
   $('prediction-new').addEventListener('click', openPrediction);
   $('prediction-save').addEventListener('click', (event) => run(event.currentTarget, createPrediction, '创建中'));
@@ -1884,13 +2136,20 @@ async function boot() {
     run(event.currentTarget, () => loadLedger(state.ledgerPage + 1)).finally(syncLedgerPager);
   });
   bridge.onContext((next) => {
-    if (next && next.isDark !== undefined) applyTheme(next.isDark);
+    if (next && next.isDark !== undefined) {
+      applyTheme(next.isDark);
+      if (state.economy) renderStockTrend(state.economy.stocks || []);
+    }
+  });
+  window.addEventListener('resize', () => {
+    if (state.economy) renderStockTrend(state.economy.stocks || []);
   });
   try {
     await loadSummary();
   } catch (error) {
     say(errorText(error), 'error');
   }
+  await loadEconomy();
   // 供页面 smoke 测试使用
   window.__shopPage = {
     state,

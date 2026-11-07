@@ -718,10 +718,13 @@ class CheckinShopPlugin(Star):
                 self._pendings[pending.token] = pending
                 yield event.plain_result(f"是否确认本次操作？\n{prompt}\n请引用本条消息回复 是/否（{timeout} 秒内有效，编号 {pending.token}）")
                 return
+            render_context: dict[str, Any] = {}
+
             def view(data: dict):
                 info = economy.overview(data, now)
                 assets = economy.user_assets(data, user_key, now)
                 assets['business_date'] = items.today(data, now)
+                render_context['stocks'] = info['stocks']
                 return economy_chat.display(section, str(text or ""), info, assets, business.display_prefix(data.get("settings")))
             message = await self.store.mutate(view, self._seed())
         except ValueError as exc:
@@ -731,7 +734,9 @@ class CheckinShopPlugin(Star):
             logger.exception("[打卡商店] 玩法请求失败")
             yield event.plain_result("操作未完成，请稍后重试；积分没有扣除。")
             return
-        async for result in self._send(event, message, partial(render.render_economy, section, message, self.store.render_dir, self._palette())):
+        market_data = render_context.get('stocks') if section == "股市" and message.startswith("虚构股市") else None
+        card = partial(render.render_economy, section, message, self.store.render_dir, self._palette(), market_data)
+        async for result in self._send(event, message, card):
             yield result
 
     @filter.command("股市")

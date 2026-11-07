@@ -534,6 +534,20 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
     def cmd(name: str) -> str:
         return command_text(name, settings)
 
+    # 玩法默认关闭时，帮助页不要引导用户使用不可用入口。运行数据由
+    # economy.ensure 补齐；缺少 economy 的旧内存快照按关闭处理。
+    economy_settings = ((data.get("economy") or {}).get("settings") or {})
+    enabled = {
+        "stocks": economy_settings.get("stocks_enabled") is True,
+        "savings": economy_settings.get("savings_enabled") is True,
+        "predictions": economy_settings.get("predictions_enabled") is True,
+        "lottery": economy_settings.get("lottery_enabled") is True,
+        "items": (
+            economy_settings.get("checkin_cards_enabled") is True
+            or economy_settings.get("rebate_cards_enabled") is True
+        ),
+    }
+
     rules = [f"打卡积分：{reward_rule_text(rewards)}"]
     if rewards.get("streak_bonus_enabled"):
         every = max(0, _as_int(rewards.get("streak_bonus_every"), 0))
@@ -550,32 +564,41 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
     rules.append(f"兑换确认：{timeout} 秒内引用确认消息回复 是 / 否")
     rules.append("发放通知：兑换记录被标记「已发放」后，机器人会私聊通知你（开启邮件通知时同时发邮件）")
 
+    commands = [
+        (cmd("打卡"), f"每天一次，按后台配置发放积分（别名 {cmd('签到')}）"),
+        (cmd("商店"), "查看自己能兑换和暂时换不了的商品"),
+        (
+            cmd("兑换商品"),
+            f"不带编号：列出商品编号；带上编号直接兑换（别名 {cmd('兑换')}）",
+        ),
+        (cmd("我的积分"), f"查看积分、连签天数与最近记录（别名 {cmd('积分')}）"),
+        (cmd("积分榜"), f"查看本平台积分排行（别名 {cmd('排行榜')}）"),
+    ]
+    if enabled["stocks"]:
+        commands.append((cmd("股市"), "查看虚构行情、持仓；买入/卖出 股票代码 股数"))
+    if enabled["savings"]:
+        commands.append((cmd("积分通"), "查看活期账户；存入/取出 积分数"))
+    if enabled["predictions"]:
+        commands.append((cmd("竞猜"), "查看题目；下注 题号 选项 积分数"))
+    if enabled["lottery"]:
+        commands.append((cmd("刮刮乐"), "查看奖表；购买一张，引用确认后开奖"))
+    if enabled["items"]:
+        commands.append((cmd("我的道具"), "查看签到增益有效期与余额返利卡冷却"))
+    commands.extend([
+            (
+                cmd("绑定邮箱 邮箱"),
+                "绑定收件邮箱（发放邮件用）；不带参数查看，填「解绑」清除",
+            ),
+            (cmd("商店帮助"), f"就是这张图（别名 {cmd('打卡帮助')}）"),
+        ])
+
     return HelpView(
         title=f"{title} · 帮助",
         subtitle=(
             "打卡赚积分，积分可以兑换商品。"
             f"以下指令需要先唤醒机器人（{prefix} 前缀、@ 机器人或引用机器人消息）。"
         ),
-        commands=[
-            (cmd("打卡"), f"每天一次，按后台配置发放积分（别名 {cmd('签到')}）"),
-            (cmd("商店"), "查看自己能兑换和暂时换不了的商品"),
-            (
-                cmd("兑换商品"),
-                f"不带编号：列出商品编号；带上编号直接兑换（别名 {cmd('兑换')}）",
-            ),
-            (cmd("我的积分"), f"查看积分、连签天数与最近记录（别名 {cmd('积分')}）"),
-            (cmd("积分榜"), f"查看本平台积分排行（别名 {cmd('排行榜')}）"),
-            (cmd("股市"), "查看虚构行情、持仓；买入/卖出 股票代码 股数"),
-            (cmd("积分通"), "查看活期账户；存入/取出 积分数"),
-            (cmd("竞猜"), "查看题目；下注 题号 选项 积分数"),
-            (cmd("刮刮乐"), "查看奖表；购买一张，引用确认后开奖"),
-            (cmd("我的道具"), "查看签到增益有效期与余额返利卡冷却"),
-            (
-                cmd("绑定邮箱 邮箱"),
-                "绑定收件邮箱（发放邮件用）；不带参数查看，填「解绑」清除",
-            ),
-            (cmd("商店帮助"), f"就是这张图（别名 {cmd('打卡帮助')}）"),
-        ],
+        commands=commands,
         rules=rules,
         steps=[
             f"发送 {cmd('兑换商品')} 看商品编号（也可以直接写商品名）",
