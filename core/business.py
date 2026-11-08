@@ -61,7 +61,7 @@ LEDGER_REFUND = "返还"
 LEDGER_ADJUST = "调整"
 LEDGER_TYPES = (LEDGER_CHECKIN, LEDGER_REDEEM, LEDGER_REFUND, LEDGER_ADJUST,
                 "股票买入", "股票卖出", "积分通存入", "积分通取出", "存款利息",
-                "竞猜下注", "竞猜返还", "竞猜派彩", "刮奖购买", "刮奖奖金", "道具返利")
+                "竞猜下注", "竞猜返还", "竞猜派彩", "刮奖购买", "刮奖奖金", "道具返利", "倍率加成")
 # 流水条数上限：只保留最近这些条，避免 shop.json 无限增长
 # （单条约 200 字节，1000 条约 200KB，落盘仍然是"整份 JSON 重写"的原子写）。
 LEDGER_LIMIT = 1000
@@ -545,6 +545,7 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
         "items": (
             economy_settings.get("checkin_cards_enabled") is True
             or economy_settings.get("rebate_cards_enabled") is True
+            or economy_settings.get("multiplier_cards_enabled") is True
         ),
     }
 
@@ -583,7 +584,7 @@ def build_help_view(data: dict[str, Any]) -> HelpView:
     if enabled["lottery"]:
         commands.append((cmd("刮刮乐"), "查看奖表；购买一张，引用确认后开奖"))
     if enabled["items"]:
-        commands.append((cmd("我的道具"), "查看签到增益有效期与余额返利卡冷却"))
+        commands.append((cmd("我的道具"), "查看签到增益有效期与积分卡券冷却"))
     commands.extend([
             (
                 cmd("绑定邮箱 邮箱"),
@@ -850,6 +851,8 @@ def build_pending(
     now: float,
 ) -> PendingConfirm:
     """为一次兑换生成待确认请求。"""
+    if product.product_type not in items.TYPES:
+        raise ValueError("不支持的商品类型，请联系管理员修改")
     settings = data.get("settings", {})
     timeout = max(10, _as_int(settings.get("confirm_timeout_seconds"), 60))
     wallet = int(data.get("users", {}).get(user_key, {}).get("points", 0))
@@ -861,7 +864,7 @@ def build_pending(
         remaining = max(0, product.per_user_daily_limit - usage.get("products", {}).get(product.id, 0))
         rule += f" 今日此商品剩余 {remaining} 次。"
     if product.product_type != "normal":
-        family = "checkin_card_daily_limit" if product.product_type == "checkin_boost" else "rebate_card_daily_limit"
+        family = items.CARD_SETTINGS[product.product_type][1]
         remaining = max(0, data.get("economy", {}).get("settings", {}).get(family, 1) - usage.get("families", {}).get(product.product_type, 0))
         rule += f" 今日同类道具剩余 {remaining} 次；自动发放后不支持普通退款。"
     return PendingConfirm(
@@ -1088,7 +1091,9 @@ def perform_redemption(
         )
     if pending.product_fingerprint and pending.product_fingerprint != items.fingerprint(data, product):
         return False, "商品效果或限购规则已变更，请重新发起兑换确认", _as_int(user.get("points")), ""
-    if product.product_type == "balance_rebate" and pending.quote.get("wallet") != _as_int(user.get("points")):
+    if product.product_type in ("balance_rebate", "balance_multiplier") and pending.quote.get("wallet") != _as_int(user.get("points")):
+        if product.product_type == "balance_multiplier":
+            return False, "可用余额已变更，请重新确认本次倍率加成金额", _as_int(user.get("points")), ""
         return False, "可用余额已变更，请重新确认本次返利金额", _as_int(user.get("points")), ""
     if product.stock is not None and product.stock <= 0:
         return False, f"「{product.name}」库存不足，本次兑换已取消", _as_int(user.get("points")), ""
@@ -1223,10 +1228,10 @@ def append_ledger(
         "created_at": now,
         "source": ("股市" if str(kind).startswith("股票") else "积分通" if str(kind).startswith(("积分通", "存款"))
                    else "竞猜" if str(kind).startswith("竞猜") else "刮刮乐" if str(kind).startswith("刮奖")
-                   else "道具" if str(kind).startswith("道具") else "打卡" if kind == LEDGER_CHECKIN
+                   else "道具" if str(kind).startswith("道具") else "积分倍率卡" if kind == "倍率加成" else "打卡" if kind == LEDGER_CHECKIN
                    else "管理调整" if kind == LEDGER_ADJUST else "商店"),
         "fee": 0,
-        "profit": _as_int(points) if kind in (LEDGER_CHECKIN, "道具返利") else 0,
+        "profit": _as_int(points) if kind in (LEDGER_CHECKIN, "道具返利", "倍率加成") else 0,
     }
     ledger = data.setdefault("ledger", [])
     if not isinstance(ledger, list):

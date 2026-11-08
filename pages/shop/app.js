@@ -563,7 +563,7 @@ function renderProducts() {
     if (product.product_type && product.product_type !== 'normal') {
       const type = document.createElement('small');
       type.className = 'product-type-label';
-      type.textContent = product.product_type === 'checkin_boost' ? '签到增益卡' : '余额返利卡';
+      type.textContent = ({ checkin_boost: '签到增益卡', balance_rebate: '余额返利卡', balance_multiplier: '积分倍率卡' })[product.product_type] || '特殊商品';
       cells[2].appendChild(type);
     }
     cells[3].textContent = `${product.cost} 积分`;
@@ -823,6 +823,8 @@ function openProduct(product) {
   $('p-rebate-rate').value = (effect.rebate_bps ?? 1500) / 100;
   $('p-rebate-cap').value = effect.rebate_cap ?? 350;
   $('p-rebate-cooldown').value = effect.cooldown_hours ?? 168;
+  $('p-balance-multiplier').value = (effect.multiplier_bps ?? 1500) / 10000;
+  $('p-multiplier-cooldown').value = effect.cooldown_hours ?? 0;
   $('p-desc').value = product ? product.description || '' : '';
   $('p-enabled').checked = product ? product.enabled !== false : true;
   $('p-image').value = '';
@@ -838,7 +840,7 @@ function openProduct(product) {
   showModal('product-modal', $('p-name'));
 }
 
-const PRODUCT_FIELDS = ['p-name', 'p-cost', 'p-stock', 'p-limit', 'p-daily-limit', 'p-type', 'p-boost-multiplier', 'p-boost-days', 'p-boost-cap', 'p-rebate-rate', 'p-rebate-cap', 'p-rebate-cooldown'];
+const PRODUCT_FIELDS = ['p-name', 'p-cost', 'p-stock', 'p-limit', 'p-daily-limit', 'p-type', 'p-boost-multiplier', 'p-boost-days', 'p-boost-cap', 'p-rebate-rate', 'p-rebate-cap', 'p-rebate-cooldown', 'p-balance-multiplier', 'p-multiplier-cooldown'];
 
 // 百分比最多两位小数，先按字符串拆分，避免浮点乘法改变基点值。
 function readPercent(inputId, minBps = 0, maxBps = 10000) {
@@ -850,20 +852,36 @@ function readPercent(inputId, minBps = 0, maxBps = 10000) {
   return { value, error: '' };
 }
 
+// 额外倍率使用原始小数（0.15 表示增加 15%），最多四位小数，精确转成万分比。
+function readBalanceMultiplier(inputId) {
+  const raw = String($(inputId).value).trim();
+  if (!/^(?:\d+(?:\.\d{1,4})?|\.\d{1,4})$/.test(raw)) return { value: null, error: '请填写额外倍率，最多四位小数；例如 0.15 表示增加 15%。' };
+  const [whole, fraction = ''] = raw.split('.');
+  const value = Number(whole || '0') * 10000 + Number(fraction.padEnd(4, '0'));
+  if (!Number.isSafeInteger(value) || value < 1 || value > 1000000) return { value: null, error: '额外倍率必须在 0.0001 至 100 之间。' };
+  return { value, error: '' };
+}
+
 function syncProductType(applyDefaults = false) {
   const type = $('p-type').value;
   const boost = type === 'checkin_boost';
   const rebate = type === 'balance_rebate';
-  $('p-effect-fields').hidden = !boost && !rebate;
+  const multiplier = type === 'balance_multiplier';
+  $('p-effect-fields').hidden = !boost && !rebate && !multiplier;
   $('p-boost-fields').hidden = !boost;
   $('p-rebate-fields').hidden = !rebate;
-  if (applyDefaults && !state.previewProductId && (boost || rebate)) $('p-cost').value = boost ? 50 : 300;
+  $('p-multiplier-fields').hidden = !multiplier;
+  if (applyDefaults && !state.previewProductId && (boost || rebate || multiplier)) $('p-cost').value = boost ? 50 : 300;
   updateProductEffectSummary();
 }
 
 function updateProductEffectSummary() {
   if ($('p-type').value === 'checkin_boost') {
     $('p-effect-summary').textContent = `即日起生效，持续 ${$('p-boost-days').value || '—'} 个业务日；基础签到积分按 ${$('p-boost-multiplier').value || '—'}% 计算，额外积分每日最多 ${$('p-boost-cap').value || '0'} 分，不含连签奖励。已有生效中的卡时不能重复购买。`;
+  } else if ($('p-type').value === 'balance_multiplier') {
+    const multiplier = readBalanceMultiplier('p-balance-multiplier');
+    const rate = multiplier.error ? '—' : `${multiplier.value / 100}%`;
+    $('p-effect-summary').textContent = `确认兑换后即时生效：兑换后余额 = 兑换前可用余额 − 卡价 +（兑换前可用余额 × ${$('p-balance-multiplier').value || '—'}），即额外增加 ${rate}。最终积分按整数四舍五入，小数第一位满 5 进 1，无单次加成上限。存款、持仓与竞猜资金不计入；同类卡共享每日限购，冷却 ${$('p-multiplier-cooldown').value || '0'} 小时。`;
   } else {
     $('p-effect-summary').textContent = `兑换时按扣购卡价前的可用钱包余额返还 ${$('p-rebate-rate').value || '0'}%，最高 ${$('p-rebate-cap').value || '0'} 积分；存款、持仓与竞猜资金不计入。返还少于卡价时不可兑换，同类卡冷却 ${$('p-rebate-cooldown').value || '0'} 小时。`;
   }
@@ -908,12 +926,13 @@ async function saveProduct() {
   if (stock.error) setFieldError('p-stock', stock.error);
   if (limit.error) setFieldError('p-limit', limit.error);
   if (dailyLimit.error) setFieldError('p-daily-limit', dailyLimit.error);
-  if (!['normal', 'checkin_boost', 'balance_rebate'].includes(type)) setFieldError('p-type', '请选择有效的商品类型。');
+  if (!['normal', 'checkin_boost', 'balance_rebate', 'balance_multiplier'].includes(type)) setFieldError('p-type', '请选择有效的商品类型。');
   const effectFields = type === 'checkin_boost'
     ? [['p-boost-multiplier', 'multiplier_bps', 10000, true], ['p-boost-days', 'days', 1], ['p-boost-cap', 'daily_bonus_cap', 0]]
-    : type === 'balance_rebate' ? [['p-rebate-rate', 'rebate_bps', 1, true], ['p-rebate-cap', 'rebate_cap', 0], ['p-rebate-cooldown', 'cooldown_hours', 0]] : [];
+    : type === 'balance_rebate' ? [['p-rebate-rate', 'rebate_bps', 1, true], ['p-rebate-cap', 'rebate_cap', 0], ['p-rebate-cooldown', 'cooldown_hours', 0]]
+      : type === 'balance_multiplier' ? [['p-balance-multiplier', 'multiplier_bps', 1, 'multiplier'], ['p-multiplier-cooldown', 'cooldown_hours', 0]] : [];
   effectFields.forEach(([id, key, min, percent]) => {
-    const result = percent ? readPercent(id, min, key === 'multiplier_bps' ? 1000000 : 10000) : readInteger(id, { allowEmpty: false, min });
+    const result = percent === 'multiplier' ? readBalanceMultiplier(id) : percent ? readPercent(id, min, key === 'multiplier_bps' ? 1000000 : 10000) : readInteger(id, { allowEmpty: false, min });
     const max = key === 'days' ? 365 : key === 'cooldown_hours' ? 87600 : Number.MAX_SAFE_INTEGER;
     if (!result.error && result.value > max) result.error = `请填写不大于 ${max} 的整数。`;
     if (result.error) setFieldError(id, result.error);
@@ -1391,6 +1410,7 @@ const ECONOMY_SWITCHES = {
   predictions_enabled: 'e-predictions-enabled', auto_predictions_enabled: 'e-auto-predictions-enabled',
   lottery_enabled: 'e-lottery-enabled', checkin_cards_enabled: 'e-checkin-cards-enabled',
   rebate_cards_enabled: 'e-rebate-cards-enabled',
+  multiplier_cards_enabled: 'e-multiplier-cards-enabled',
 };
 
 const ECONOMY_FIELDS = [
@@ -1411,6 +1431,7 @@ const ECONOMY_FIELDS = [
   ['lottery_daily_limit', 'lottery', '每人每日购买次数', 3, 0, Number.MAX_SAFE_INTEGER],
   ['checkin_card_daily_limit', 'card', '签到增益卡同类每日限购', 1, 0, Number.MAX_SAFE_INTEGER],
   ['rebate_card_daily_limit', 'card', '余额返利卡同类每日限购', 1, 0, Number.MAX_SAFE_INTEGER],
+  ['multiplier_card_daily_limit', 'card', '积分倍率卡同类每日限购', 1, 0, Number.MAX_SAFE_INTEGER],
 ];
 
 const DEFAULT_LOTTERY_PRIZES = [{ points: 0, weight: 45 }, { points: 5, weight: 20 }, { points: 10, weight: 25 }, { points: 40, weight: 9 }, { points: 100, weight: 1 }];
@@ -1930,11 +1951,14 @@ function renderAssets(data) {
   }
   if (cards.rebate_last_at) cardEntries.push(['上次余额返利', beijingTime(cards.rebate_last_at)]);
   if (cards.rebate_cooldown_until) cardEntries.push(['余额返利卡', Number(cards.rebate_cooldown_until) > Date.now() / 1000 ? `冷却至 ${beijingTime(cards.rebate_cooldown_until)}` : '冷却已结束']);
+  if (cards.multiplier_last_at) cardEntries.push(['上次积分倍率加成', beijingTime(cards.multiplier_last_at)]);
+  if (cards.multiplier_cooldown_until) cardEntries.push(['积分倍率卡', Number(cards.multiplier_cooldown_until) > Date.now() / 1000 ? `冷却至 ${beijingTime(cards.multiplier_cooldown_until)}` : '冷却已结束']);
   content.appendChild(assetDefinition('卡券状态', cardEntries.length ? cardEntries : [['当前状态', '暂无有效卡券或冷却记录']]));
   const usageLabels = { date: '签到日', stock_trades: '股票交易次数', stock_buy_total: '股票买入积分', prediction_stake: '竞猜投入积分', lottery_count: '刮刮乐次数' };
   const usageEntries = Object.entries(usage).filter(([key, value]) => usageLabels[key] && (typeof value === 'number' || typeof value === 'string')).map(([key, value]) => [usageLabels[key], value]);
   Object.entries(usage.families || {}).forEach(([key, value]) => {
-    if (['checkin_boost', 'balance_rebate'].includes(key)) usageEntries.push([key === 'checkin_boost' ? '签到增益卡购买' : '余额返利卡购买', value]);
+    const label = ({ checkin_boost: '签到增益卡购买', balance_rebate: '余额返利卡购买', balance_multiplier: '积分倍率卡购买' })[key];
+    if (label) usageEntries.push([label, value]);
   });
   content.appendChild(assetDefinition('今日使用情况', usageEntries.length ? usageEntries : [['当前状态', '暂无今日使用记录']]));
 }
@@ -2029,7 +2053,7 @@ async function boot() {
   $('set-prefix').addEventListener('input', updatePrefixHint);
   $('new-product').addEventListener('click', () => openProduct(null));
   $('p-type').addEventListener('change', () => syncProductType(true));
-  ['p-boost-multiplier', 'p-boost-days', 'p-boost-cap', 'p-rebate-rate', 'p-rebate-cap', 'p-rebate-cooldown'].forEach((id) => $(id).addEventListener('input', updateProductEffectSummary));
+  ['p-boost-multiplier', 'p-boost-days', 'p-boost-cap', 'p-rebate-rate', 'p-rebate-cap', 'p-rebate-cooldown', 'p-balance-multiplier', 'p-multiplier-cooldown'].forEach((id) => $(id).addEventListener('input', updateProductEffectSummary));
   $('economy-refresh').addEventListener('click', (event) => run(event.currentTarget, loadEconomy, '加载中'));
   $('save-economy').addEventListener('click', (event) => run(event.currentTarget, saveEconomy, '保存中'));
   $('stock-new').addEventListener('click', () => openStockEditor());

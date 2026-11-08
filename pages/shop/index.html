@@ -482,7 +482,7 @@
             <details class="economy-section" open>
               <summary>积分卡券<span>开关与同类每日限购</span></summary>
               <div class="economy-section-body">
-                <div class="switch-group"><label class="switch-field"><input id="e-checkin-cards-enabled" type="checkbox" /><span>启用签到增益卡</span></label><label class="switch-field"><input id="e-rebate-cards-enabled" type="checkbox" /><span>启用余额返利卡</span></label></div>
+                <div class="switch-group"><label class="switch-field"><input id="e-checkin-cards-enabled" type="checkbox" /><span>启用签到增益卡</span></label><label class="switch-field"><input id="e-rebate-cards-enabled" type="checkbox" /><span>启用余额返利卡</span></label><label class="switch-field"><input id="e-multiplier-cards-enabled" type="checkbox" /><span>启用积分倍率卡</span></label></div>
                 <div class="form-grid" id="economy-card-fields"></div><p class="muted">同一类型的不同商品共享每日限购次数。卡券价格和效果在「商品管理」选择商品类型后设置。</p>
               </div>
             </details>
@@ -499,7 +499,7 @@
         <div id="product-modal-status" class="modal-status" role="status" aria-live="polite" hidden></div>
         <div class="form-grid">
           <div class="form-section-title">基本信息</div>
-          <label class="wide"><span class="field-label">商品类型</span><select id="p-type"><option value="normal">普通商品</option><option value="checkin_boost">签到增益卡</option><option value="balance_rebate">余额返利卡</option></select><span class="field-hint">普通商品沿用人工发放；卡券按对应规则自动生效。旧商品不会按名称自动转换。</span><span id="p-type-error" class="field-error"></span></label>
+          <label class="wide"><span class="field-label">商品类型</span><select id="p-type"><option value="normal">普通商品</option><option value="checkin_boost">签到增益卡</option><option value="balance_rebate">余额返利卡</option><option value="balance_multiplier">积分倍率卡</option></select><span class="field-hint">普通商品沿用人工发放；卡券按对应规则自动生效。旧商品不会按名称自动转换。</span><span id="p-type-error" class="field-error"></span></label>
           <label class="wide">
             <span class="field-label">名称</span>
             <input id="p-name" type="text" maxlength="40" placeholder="例如：冰镇可乐" />
@@ -541,6 +541,10 @@
               <label><span class="field-label">余额返利比例（%）</span><input id="p-rebate-rate" type="number" min="0.01" max="100" step="0.01" value="15" /><span id="p-rebate-rate-error" class="field-error"></span></label>
               <label><span class="field-label">单次返利积分上限</span><input id="p-rebate-cap" type="number" min="0" step="1" value="350" /><span id="p-rebate-cap-error" class="field-error"></span></label>
               <label><span class="field-label">同类卡冷却时间（小时）</span><input id="p-rebate-cooldown" type="number" min="0" max="87600" step="1" value="168" /><span id="p-rebate-cooldown-error" class="field-error"></span></label>
+            </div>
+            <div class="form-grid" id="p-multiplier-fields" hidden>
+              <label><span class="field-label">额外积分倍率（x）</span><input id="p-balance-multiplier" type="number" min="0.0001" max="100" step="0.0001" value="0.15" /><span class="field-hint">0.15 表示按兑换前可用积分增加 15%；1.5 表示增加 150%，并非签到倍率。最终积分按整数四舍五入，小数第一位满 5 进 1。</span><span id="p-balance-multiplier-error" class="field-error"></span></label>
+              <label><span class="field-label">同类卡冷却时间（小时）</span><input id="p-multiplier-cooldown" type="number" min="0" max="87600" step="1" value="0" /><span class="field-hint">0 表示无额外冷却，仍受同类每日限购约束。</span><span id="p-multiplier-cooldown-error" class="field-error"></span></label>
             </div>
             <p id="p-effect-summary" class="inline-notice"></p>
           </div>

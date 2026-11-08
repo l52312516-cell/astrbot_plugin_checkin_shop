@@ -54,7 +54,7 @@ except ImportError:  # AstrBot 把 main.py 当顶层模块加载
     from core.store import Store, default_data  # type: ignore[no-redef]
 
 PLUGIN_ID = "astrbot_plugin_checkin_shop"
-PLUGIN_VERSION = "1.4.3"
+PLUGIN_VERSION = "1.4.4"
 IMAGE_ONLY_TEXT_THRESHOLD = 200
 DEFAULT_DATA_DIR = os.path.join("data", "plugin_data", PLUGIN_ID)
 
@@ -388,6 +388,14 @@ class CheckinShopPlugin(Star):
                         message_id = matched.group(1)
         return text, message_id, sender_id
 
+    @staticmethod
+    def _without_t2i(result):
+        # 本地图片不能被宿主替换；确认编号也必须保留在引用可读的文字中。
+        disable_t2i = getattr(result, "use_t2i", None)
+        if callable(disable_t2i):
+            disable_t2i(False)
+        return result
+
     async def _send(
         self,
         event: AstrMessageEvent,
@@ -408,14 +416,6 @@ class CheckinShopPlugin(Star):
         path = ""
         failure = ""
 
-        def preserve_result(result):
-            # 图片已由插件本地绘制。宿主的长文本转图会把整条消息链替换，
-            # 不能再让它处理附带的说明文字；纯文本失败诊断也应原样可见。
-            disable_t2i = getattr(result, "use_t2i", None)
-            if callable(disable_t2i):
-                disable_t2i(False)
-            return result
-
         if card is not None:
             try:
                 # 渲染是 CPU 密集的同步操作（Pillow 画图 + PNG 编码 + 落盘），直接在事件
@@ -433,7 +433,7 @@ class CheckinShopPlugin(Star):
             caption = "" if len(text.strip()) >= IMAGE_ONLY_TEXT_THRESHOLD else text
             try:
                 result = event.chain_result([Plain(caption), Image.fromFileSystem(path)]) if caption else event.image_result(path)
-                result = preserve_result(result)
+                result = self._without_t2i(result)
             except Exception as exc:
                 failure = f"{type(exc).__name__}，阶段：组装"
                 logger.exception("[打卡商店] 图片消息组装失败，已降级为文本")
@@ -444,7 +444,7 @@ class CheckinShopPlugin(Star):
             if render_label and failure:
                 text += f"\n\n{render_label}图片生成失败（{failure}）。已显示文字行情。"
             result = event.plain_result(text)
-            yield preserve_result(result) if card is not None else result
+            yield self._without_t2i(result) if card is not None else result
 
     def _render_card(self, card: Any) -> str:
         """在工作线程里出图（渲染是 CPU 密集的同步操作，别占事件循环）。
@@ -740,7 +740,7 @@ class CheckinShopPlugin(Star):
                 pending, prompt, timeout = await self.store.mutate(prepare, self._seed())
                 self._prune_pendings()
                 self._pendings[pending.token] = pending
-                yield event.plain_result(f"是否确认本次操作？\n{prompt}\n请引用本条消息回复 是/否（{timeout} 秒内有效，编号 {pending.token}）")
+                yield self._without_t2i(event.plain_result(f"是否确认本次操作？\n{prompt}\n请引用本条消息回复 是/否（{timeout} 秒内有效，编号 {pending.token}）"))
                 return
             render_context: dict[str, Any] = {}
 
@@ -1145,7 +1145,7 @@ class CheckinShopPlugin(Star):
         timeout = max(
             10, int((data.get("settings") or {}).get("confirm_timeout_seconds") or 60)
         )
-        yield event.plain_result(business.prompt_text(pending, timeout))
+        yield self._without_t2i(event.plain_result(business.prompt_text(pending, timeout)))
 
     def _prune_pendings(self) -> None:
         """清理过期/过多的待确认请求与已处理编号。"""

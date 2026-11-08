@@ -35,7 +35,7 @@ TERMINAL = {"resolved", "cancelled", "void"}
 DEFAULT_SETTINGS: dict[str, Any] = {
     "stocks_enabled": False, "savings_enabled": False, "predictions_enabled": False,
     "auto_predictions_enabled": False, "lottery_enabled": False,
-    "checkin_cards_enabled": False, "rebate_cards_enabled": False,
+    "checkin_cards_enabled": False, "rebate_cards_enabled": False, "multiplier_cards_enabled": False,
     "stock_fee_bps": 100, "stock_hourly_bps": 200, "stock_daily_bps": 1000,
     "stock_daily_trades": 20, "stock_daily_buy_limit": 1000,
     "savings_rate_bps": 5, "savings_principal_cap": 5000,
@@ -48,7 +48,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         {"points": 10, "weight": 25}, {"points": 40, "weight": 9},
         {"points": 100, "weight": 1},
     ],
-    "checkin_card_daily_limit": 1, "rebate_card_daily_limit": 1,
+    "checkin_card_daily_limit": 1, "rebate_card_daily_limit": 1, "multiplier_card_daily_limit": 1,
 }
 
 
